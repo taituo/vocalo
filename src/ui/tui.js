@@ -37,14 +37,17 @@ function detectImageProtocol() {
 }
 
 export class TvUI {
-  constructor({ aspect = '16:9', out = process.stdout, inp = process.stdin } = {}) {
+  constructor({ aspect = '16:9', out = process.stdout, inp = process.stdin, readFile: rf = readFile } = {}) {
     this.out = out; this.inp = inp;
+    this.readFile = rf; // remote mode: reads go to the agent's machine over SSH
     this.aspect = aspect;
     this.imgProto = detectImageProtocol();
     this.s = {
       state: 'idle', bg: [16, 24, 32], title: 'Vocalo', caption: '', image: null, code: null,
       assistant: '', assistantShown: '', user: '', userPartial: '', tool: '', metrics: null,
       permission: null, typing: false, input: '', mode: 'vad', muted: false, notice: '',
+      typingKind: 'text', overlay: null, plan: [], showPlan: true, diff: null,
+      agent: { where: 'local', model: null, mode: null, effort: null, contextPct: null }, pendingUrl: null,
     };
     this.handlers = {};
     this.dirty = true;
@@ -93,6 +96,11 @@ export class TvUI {
     if (n >= r.words.length) this.reveal = null;
   }
 
+  overlay(title, lines) { this.set({ overlay: { title, lines } }); }
+  plan(entries) { this.set({ plan: entries || [] }); }
+  showDiff(d) { this.lastDiff = d; this.set({ diff: d, code: null, image: null }); }
+  agentInfo(patch) { this.set({ agent: { ...this.s.agent, ...patch } }); }
+
   scene(tag) {
     if (tag.kind === 'scene') {
       const patch = {};
@@ -119,12 +127,18 @@ export class TvUI {
     if (k === '\x03') return this.#fire('quit');
     const s = this.s;
     if (s.typing) {
-      if (k === '\r' || k === '\n') { const t = s.input; this.set({ typing: false, input: '' }); if (t.trim()) this.#fire('text', t); }
+      if (k === '\r' || k === '\n') {
+        const t = s.input, kind = s.typingKind;
+        this.set({ typing: false, input: '' });
+        if (t.trim()) this.#fire(kind === 'cmd' ? 'command' : 'text', t);
+      }
       else if (k === '\x1b') this.set({ typing: false, input: '' });
       else if (k === '\x7f') this.set({ input: s.input.slice(0, -1) });
       else if (k >= ' ') this.set({ input: s.input + k });
       return;
     }
+    if (s.overlay) { this.set({ overlay: null }); if (k === '\x1b' || k === 'q') return; }
+    if (s.pendingUrl && k === 'o') { const u = s.pendingUrl; this.set({ pendingUrl: null }); return this.#fire('open_url', u); }
     if (s.permission) {
       if (k === 'y') return this.#fire('permission', 'allow');
       if (k === 'a') return this.#fire('permission', 'always');
@@ -133,7 +147,12 @@ export class TvUI {
     switch (k) {
       case 'q': return this.#fire('quit');
       case ' ': return this.#fire('ptt');
-      case '\t': case 't': return this.set({ typing: true });
+      case '\t': case 't': return this.set({ typing: true, typingKind: 'text' });
+      case ':': case '/': return this.set({ typing: true, typingKind: 'cmd', input: '' });
+      case 'p': return this.set({ showPlan: !s.showPlan });
+      case 'd': return this.set({ diff: s.diff ? null : this.lastDiff ?? null, code: null });
+      case 'c': return this.set({ code: null, diff: null, image: null });
+      case '?': case 'h': return this.#fire('command', 'help');
       case 'm': return this.#fire('mute');
       case 'i': case '\x1b': return this.#fire('interrupt');
       case 'v': return this.#fire('mode');
@@ -169,24 +188,67 @@ export class TvUI {
     const live = s.state === 'speaking' ? `${bg([200, 30, 45])}${fg([255, 255, 255])}${BOLD} LIVE ${RESET}${bg(base)}` : '';
     const stateIcon = { idle: '○ ready', listening: '● listening', thinking: '◌ thinking', speaking: '◉ speaking' }[s.state] || s.state;
     const left = `${fg(light)}${BOLD} ▌VOCALO ${RESET}${bg(base)} ${live}`;
-    const right = `${fg(shade(light, 1.2))}${stateIcon}${s.muted ? ' · mic off' : ''} · ${s.mode === 'ptt' ? 'push-to-talk' : 'hands-free'} `;
-    const mid = (s.code || s.image) && s.title ? `${fg([255, 255, 255])}${BOLD}${s.title}${RESET}${bg(base)}` : '';
+    const a = s.agent;
+    const ctx = a.contextPct != null ? ` · ctx ${ctxBar(a.contextPct)}` : '';
+    const tail = `${stateIcon}${s.muted ? ' · mic off' : ''} · ${s.mode === 'ptt' ? 'PTT' : 'hands-free'}${ctx} `;
+    // drop the least important agent facts until the header fits
+    let bits = [a.where !== 'local' ? `⇄ ${a.where}` : null, a.model, a.mode, a.effort].filter(Boolean);
+    const room = W - visLen(left) - 4;
+    while (bits.length && visLen(bits.join(' · ') + ' │ ' + tail) > room) bits = bits.length > 1 ? bits.slice(0, -1) : [clip(bits[0], Math.max(8, room - visLen(tail) - 4))];
+    if (visLen(bits.join(' · ') + ' │ ' + tail) > room) bits = [];
+    const right = `${fg(shade(light, 1.2))}${bits.length ? bits.join(' · ') + ' │ ' : ''}${tail}`;
+    const mid = (s.code || s.image || s.diff) && s.title && s.title !== 'Vocalo' ? `${fg([255, 255, 255])}${BOLD}${s.title}${RESET}${bg(base)}` : '';
     const gap = Math.max(2, W - visLen(left) - visLen(right) - visLen(mid));
     lines[0] = left + ' '.repeat(Math.floor(gap / 2)) + mid + ' '.repeat(Math.ceil(gap / 2)) + right;
 
     // center: code or title/caption
     const midTop = 3;
-    if (s.code && !s.image) {
+    if (s.code && !s.image && !s.diff) {
       const codeLines = s.code.replace(/\t/g, '  ').split('\n').slice(0, H - 11);
       const cw = Math.min(W - 6, Math.max(...codeLines.map((l) => l.length), 20) + 2);
       const cx = Math.floor((W - cw) / 2);
       codeLines.forEach((l, i) => {
         lines[midTop + i] = ' '.repeat(cx) + `${bg([12, 12, 16])}${fg([190, 230, 190])} ${l.slice(0, cw - 2).padEnd(cw - 1)}${RESET}${bg(base)}`;
       });
-    } else if (!s.image && s.title) {
+    } else if (!s.image && !s.diff && !s.overlay && s.title) {
       const ty = Math.floor(H / 2) - 3;
       lines[ty] = `${fg([255, 255, 255])}${BOLD}` + center(s.title.toUpperCase().split('').join(' ')) + RESET;
       if (s.caption) lines[ty + 2] = `${fg(light)}` + center(s.caption) + RESET;
+    }
+
+    // diff view (from Kiro tool_call content)
+    if (s.diff && !s.image) {
+      const rows = diffLines(s.diff.oldText, s.diff.newText).slice(0, H - 12);
+      const cw = Math.min(W - 6, 110), cx = Math.floor((W - cw) / 2);
+      lines[midTop - 1] = ' '.repeat(cx) + `${bg([30, 30, 40])}${fg([200, 200, 255])}${BOLD} ✎ ${(s.diff.path || '').slice(-(cw - 4)).padEnd(cw - 3)}${RESET}${bg(base)}`;
+      rows.forEach(([op, l], i) => {
+        const col = op === '+' ? [[18, 48, 24], [150, 255, 160]] : op === '-' ? [[56, 18, 22], [255, 150, 150]] : op === '@' ? [[12, 12, 16], [120, 160, 255]] : [[12, 12, 16], [170, 170, 170]];
+        lines[midTop + i] = ' '.repeat(cx) + `${bg(col[0])}${fg(col[1])}${op} ${l.replace(/\t/g, '  ').slice(0, cw - 3).padEnd(cw - 2)}${RESET}${bg(base)}`;
+      });
+    }
+
+    // plan panel (top-right), standard ACP plan entries
+    if (s.showPlan && s.plan.length && !s.overlay) {
+      const pw = Math.min(42, Math.floor(W * 0.36)), px = W - pw - 2;
+      const icon = { completed: '✓', in_progress: '▸', pending: '·' };
+      const panel = [`${BOLD} PLAN ${RESET}`, ...s.plan.slice(0, H - 12).map((e) => `${icon[e.status] ?? '·'} ${e.content}`)];
+      panel.forEach((l, i) => {
+        const y = 2 + i;
+        const done = /^✓/.test(l), now = /^▸/.test(l);
+        const txt = `${bg([0, 0, 0])}${done ? DIM : ''}${now ? fg([255, 220, 120]) + BOLD : fg([230, 230, 230])} ${clip(l, pw - 2).padEnd(pw - 1)}${RESET}${bg(base)}`;
+        lines[y] = overlayAt(lines[y] ?? '', px, txt, W);
+      });
+    }
+
+    // overlay list (sessions, models, help…)
+    if (s.overlay) {
+      const ol = s.overlay.lines.slice(0, H - 6);
+      const ow = Math.min(W - 4, Math.max(30, ...ol.map((l) => [...l].length + 4), s.overlay.title.length + 6));
+      const ox = Math.floor((W - ow) / 2);
+      const box = [`${BOLD} ${s.overlay.title} ${RESET}`, ...ol, `${DIM}any key to close${RESET}`];
+      box.forEach((l, i) => {
+        lines[2 + i] = ' '.repeat(ox) + `${bg([8, 8, 12])}${fg([235, 235, 235])} ${clip(l, ow - 2).padEnd(ow - 1)}${RESET}${bg(base)}`;
+      });
     }
 
     // tool ticker
@@ -230,9 +292,10 @@ export class TvUI {
     // footer (outside the frame)
     const m = s.metrics;
     const metr = m ? `voice→voice ${m.voiceToVoiceMs ?? '–'}ms · stt ${m.sttMs ?? '–'} · agent ${m.agentFirstTokenMs ?? '–'} · tts ${m.ttsFirstAudioMs ?? '–'}` : '';
-    const keys = s.typing ? `${BOLD}type ▸ ${RESET}${s.input}█  (Enter send · Esc cancel)` :
+    const keys = s.typing ? `${BOLD}${s.typingKind === 'cmd' ? ':' : 'type ▸ '}${RESET}${s.input}█  (Enter ${s.typingKind === 'cmd' ? 'run · :help' : 'send'} · Esc cancel)` :
+      s.pendingUrl ? `${BOLD}${fg([120, 200, 255])}Kiro wants to open a sign-in page on this Mac.${RESET}  [o] open in browser` :
       s.permission ? `${BOLD}${fg([255, 200, 0])}Permission: ${s.permission}${RESET}  [y] allow  [a] always  [n] deny  (or say yes / no)` :
-      `${DIM}[space] talk  [t] type  [i] interrupt  [m] mute  [v] hands-free/PTT  [r] 16:9/4:3  [q] quit${RESET}`;
+      `${DIM}[space] talk  [t] type  [:] command  [i] interrupt  [p] plan  [d] diff  [c] clear  [m] mute  [v] PTT  [r] 16:9/4:3  [?] help  [q] quit${RESET}`;
     out.push(at(y0 + H, 1) + `${ESC}2K` + ' ' + keys);
     out.push(at(y0 + H + 1, 1) + `${ESC}2K` + ` ${DIM}${metr}${s.notice ? '  · ' + s.notice : ''}${RESET}`);
     for (let y = y0 + H + 2; y <= rows; y++) out.push(at(y, 1) + `${ESC}2K`);
@@ -250,7 +313,7 @@ export class TvUI {
       let b64 = this.s.image.data;
       if (!b64) {
         const src = this.s.image.src;
-        const buf = /^https?:/.test(src) ? Buffer.from(await (await fetch(src)).arrayBuffer()) : await readFile(src);
+        const buf = /^https?:/.test(src) ? Buffer.from(await (await fetch(src)).arrayBuffer()) : await this.readFile(src);
         b64 = buf.toString('base64');
       }
       if (this.imageDrawnKey !== key) return;
@@ -269,4 +332,41 @@ export class TvUI {
       this.set({ notice: `image failed: ${err.message}` });
     }
   }
+}
+
+function clip(s, n) { const a = [...s.replace(/\x1b\[[0-9;]*m/g, '')]; return a.length > n ? a.slice(0, n - 1).join('') + '…' : a.join(''); }
+function ctxBar(p) { const n = Math.round(Math.min(100, p) / 20); return `${'▰'.repeat(n)}${'▱'.repeat(5 - n)} ${Math.round(p)}%`; }
+
+/** Place `txt` at visible column x of an existing (plain or styled) line. */
+function overlayAt(line, x, txt, W) {
+  const plain = line.replace(/\x1b\[[0-9;]*m/g, '');
+  const left = [...plain].slice(0, x).join('').padEnd(x);
+  return left + txt;
+}
+
+/** Small line diff (LCS) for the on-screen change view, with context collapsing. */
+export function diffLines(a = '', b = '', context = 2) {
+  const A = a.split('\n'), B = b.split('\n');
+  if (A.length * B.length > 4e6) return [...A.map((l) => ['-', l]), ...B.map((l) => ['+', l])];
+  const n = A.length, m = B.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+    dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { ops.push([' ', A[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) ops.push(['-', A[i++]]);
+    else ops.push(['+', B[j++]]);
+  }
+  while (i < n) ops.push(['-', A[i++]]);
+  while (j < m) ops.push(['+', B[j++]]);
+  // collapse unchanged runs
+  const keep = ops.map((o, k) => o[0] !== ' ' || ops.slice(Math.max(0, k - context), k + context + 1).some((x) => x[0] !== ' '));
+  const out = [];
+  for (let k = 0; k < ops.length; k++) {
+    if (keep[k]) out.push(ops[k]);
+    else if (keep[k - 1] !== false) out.push(['@', '…']);
+  }
+  return out;
 }

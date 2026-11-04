@@ -3,10 +3,25 @@
     "command": "/Users/YOU/.local/bin/kiro-cli",
     "args": ["acp", "--agent-engine=v3"],
     "model": null,
-    "effortLevel": "low"
+    "effortLevel": "low",
+    "mode": null,
+    "additionalDirectories": []
   },
   "cwd": "/Users/YOU/code/some-project",
+
+  "remote_example_rename_to_remote_to_enable": {
+    "host": "me@devbox",
+    "port": 22,
+    "identityFile": null,
+    "cwd": "/home/me/code/some-project",
+    "command": "~/.local/bin/kiro-cli",
+    "env": { "KIRO_LOG_LEVEL": "info" },
+    "sshOptions": []
+  },
+
   "speech": { "url": "ws://127.0.0.1:8765", "spawn": true },
   "ui": { "aspect": "16:9", "eventsPort": 8766 },
-  "conversation": { "mode": "vad", "bargeIn": true, "permissions": "ask", "preamble": true, "defaultLang": "fi" }
+  "conversation": { "mode": "vad", "bargeIn": true, "permissions": "ask", "busyPolicy": "steer", "preamble": true, "defaultLang": "fi", "fillerAfterMs": 1400 },
+  "control": { "autoCompactAt": 85, "speakConfirmations": false },
+  "metricsFile": null
 }

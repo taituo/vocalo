@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Test double for ssh: drops options/host and runs the remote command locally.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|-p|-i|-l|-F) shift 2 ;;
+    -T|-t|-q|-v|-N) shift ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+exec bash -c "$*"

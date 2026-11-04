@@ -13,7 +13,18 @@ export class Orchestrator extends EventEmitter {
     super();
     this.acp = acp;
     this.speech = speech;
-    this.config = { bargeIn: true, permissions: 'ask', preamble: true, defaultLang: 'en', fillerAfterMs: 1400, ...config };
+    this.config = {
+      bargeIn: true, permissions: 'ask', preamble: true, defaultLang: 'en', fillerAfterMs: 1400,
+      // What to do when the user talks while the agent is busy doing agentic work (tools running):
+      //   steer     -> inject into the running turn via Kiro _session/steer (falls back to interrupt)
+      //   interrupt -> cancel and start a new turn
+      //   queue     -> hold it and send when the turn finishes
+      busyPolicy: 'steer',
+      ...config,
+    };
+    this.intercept = null;     // (text, ctx) => boolean|Promise<boolean>: local commands handled before the agent
+    this.queued = [];
+    this.sysSeq = 0;
     this.cachedPhrases = new Set();
     this.state = State.IDLE;
     this.turn = null;          // active turn object
@@ -29,7 +40,7 @@ export class Orchestrator extends EventEmitter {
     speech.on('vad', (m) => this.#onVad(m));
     speech.on('partial', (m) => this.emit('user_partial', m.text));
     speech.on('final', (m) => this.userSaid(m.text, m));
-    speech.on('barge_in', () => this.interrupt('barge-in'));
+    speech.on('barge_in', () => this.#onBargeIn());
     speech.on('say_start', (m) => this.#onSayStart(m));
     speech.on('say_end', (m) => { this.sayIds.delete(m.id); this.#maybeFinish(); });
     speech.on('idle', () => this.#onSpeechIdle());
@@ -45,20 +56,60 @@ export class Orchestrator extends EventEmitter {
   // ---------- user side ----------
   #onVad({ speaking }) {
     if (speaking) {
-      if (this.state === State.SPEAKING && this.config.bargeIn) this.interrupt('barge-in');
+      if (this.state === State.SPEAKING && this.config.bargeIn) this.#onBargeIn();
       if (this.state === State.IDLE) this.#setState(State.LISTENING);
     } else if (this.state === State.LISTENING && !this.turn) {
       // stay in listening until final arrives; sidecar sends final right after
     }
   }
 
+  get #agentBusy() { return !!(this.turn && !this.turn.cancelled && !this.turn.ended && this.turn.activeTools?.size); }
+
+  // User started talking over Vocalo. Audio stops at once (the sidecar already cut it).
+  // During tool work we only go quiet: the final transcript decides steer vs interrupt,
+  // so a cough doesn't kill a 5-minute refactor.
+  #onBargeIn() {
+    const turn = this.turn;
+    this.speech.stop();
+    this.sayIds.clear();
+    if (!turn) return;
+    if (this.#agentBusy && this.config.busyPolicy !== 'interrupt') { turn.silenced = true; this.#setState(State.LISTENING); return; }
+    this.interrupt('barge-in');
+  }
+
   /** Entry point for a finished user utterance (from STT or typed text). */
   async userSaid(text, meta = {}) {
     text = (text || '').trim();
-    if (!text) { if (!this.turn) this.#setState(State.IDLE); return; }
+    if (!text) {
+      if (this.turn?.silenced) { this.turn.silenced = false; this.#setState(State.THINKING); } // noise: keep going
+      else if (!this.turn) this.#setState(State.IDLE);
+      return;
+    }
     this.lastLang = meta.lang || guessLang(text, this.lastLang);
     this.emit('user_final', text);
-    if (this.pendingPermission) return this.#answerPermissionByVoice(text);
+    if (this.pendingPermission && this.#answerPermissionByVoice(text)) return;
+    if (this.intercept && await this.intercept(text, { busy: !!this.turn, state: this.state, meta })) return;
+    if (this.#agentBusy) {
+      const policy = this.config.busyPolicy;
+      if (policy === 'queue') {
+        this.queued.push(text);
+        this.emit('queued', text);
+        return;
+      }
+      if (policy === 'steer' && this.acp.supports?.('_session/steer')) {
+        this.speech.stop(); // stop narration, keep the work going
+        try {
+          await this.acp.steer(text);
+          this.turn.steers = (this.turn.steers || 0) + 1;
+          this.turn.silenced = false;
+          this.#setState(State.THINKING);
+          this.emit('steered', text);
+          return;
+        } catch (err) {
+          this.emit('warn', `steer failed (${err.message}); interrupting instead`);
+        }
+      }
+    }
     if (this.turn) {
       // The user kept talking before Vocalo said anything: it's one thought, not two.
       const prev = this.turn;
@@ -106,8 +157,9 @@ export class Orchestrator extends EventEmitter {
 
   #onUpdate(params) {
     const turn = this.turn;
-    if (!turn || turn.cancelled) return; // late chunks after cancel are dropped
     const u = params?.update ?? params;
+    if (u?.sessionUpdate === 'plan') { this.emit('plan', u.entries ?? []); return; }
+    if (!turn || turn.cancelled) return; // late chunks after cancel are dropped
     switch (u?.sessionUpdate) {
       case 'agent_message_chunk': {
         const c = u.content;
@@ -126,8 +178,19 @@ export class Orchestrator extends EventEmitter {
         turn.toolUsed = true;
         if (!turn.metrics.firstSayAt) this.#filler(turn, 'check');
       // fallthrough
-      case 'tool_call_update':
-        this.emit('tool', { id: u.toolCallId, title: u.title, kind: u.kind, status: u.status });
+      case 'tool_call_update': {
+        turn.activeTools ??= new Set();
+        if (u.status === 'completed' || u.status === 'failed') turn.activeTools.delete(u.toolCallId);
+        else if (u.sessionUpdate === 'tool_call' || u.status === 'in_progress' || u.status === 'pending') turn.activeTools.add(u.toolCallId);
+        this.emit('tool', { id: u.toolCallId, title: u.title, kind: u.kind, status: u.status, locations: u.locations });
+        for (const c of u.content ?? []) {
+          if (c.type === 'diff') this.emit('diff', { path: c.path, oldText: c.oldText ?? '', newText: c.newText ?? '', toolCallId: u.toolCallId });
+          else if (c.type === 'content' && c.content?.type === 'image') this.emit('scene', { kind: 'show', imageData: c.content.data, mimeType: c.content.mimeType });
+        }
+        break;
+      }
+      case 'plan':
+        this.emit('plan', u.entries ?? []);
         break;
       default:
         break; // ignore unknown types per ACP/Kiro guidance
@@ -150,7 +213,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   #say(turn, text) {
-    if (turn.cancelled) return;
+    if (turn.cancelled || turn.silenced) return;
     clearTimeout(turn.fillerTimer);
     const id = `${turn.id}.${++turn.chunk}`;
     const lang = guessLang(text, this.lastLang);
@@ -161,6 +224,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   #onSayStart({ id, text, durationMs }) {
+    if (id?.startsWith('sys.')) { this.emit('assistant_subtitle', { text, durationMs }); return; }
     const turn = this.turn;
     if (!turn || !id?.startsWith(`${turn.id}.`)) return;
     if (id.endsWith('.f')) { turn.metrics.fillerAt ??= Date.now(); }
@@ -197,6 +261,10 @@ export class Orchestrator extends EventEmitter {
     if (this.turn !== turn) return;
     this.turn = null;
     this.#setState(State.IDLE);
+    if (this.queued.length) {
+      const text = this.queued.splice(0).join(' ');
+      setImmediate(() => this.#startTurn(text, {}));
+    }
   }
 
   /** Stop talking and cancel the agent turn. Resolves once the old prompt settled. */
@@ -207,6 +275,8 @@ export class Orchestrator extends EventEmitter {
     if (!turn) return;
     turn.cancelled = true;
     clearTimeout(turn.fillerTimer);
+    this.cancelPermission(); // Kiro: cancel pending permissions before session/cancel
+    this.queued = [];
     this.emit('interrupted', reason);
     if (!turn.ended) {
       this.acp.cancel();
@@ -215,6 +285,13 @@ export class Orchestrator extends EventEmitter {
     }
     if (this.turn === turn) this.turn = null;
     this.#setState(State.LISTENING);
+  }
+
+  /** Vocalo speaking for itself (command confirmations), outside any agent turn. */
+  announce(text, lang = this.lastLang) {
+    const id = `sys.${++this.sysSeq}`;
+    this.speech.say(id, text, lang);
+    this.emit('announce', text);
   }
 
   // ---------- permissions ----------
@@ -232,7 +309,7 @@ export class Orchestrator extends EventEmitter {
     return new Promise((resolve) => {
       const title = req.toolCall?.title ?? 'run a tool';
       this.pendingPermission = { req, options, resolve };
-      this.emit('permission', { title, options });
+      this.emit('permission', { title, options, resource: req._meta?.kiro?.consent?.resource, toolCall: req.toolCall });
       const ask = this.lastLang === 'fi' ? `Saanko luvan: ${title}? Sano kyllä tai ei.` : `May I ${title}? Say yes or no.`;
       if (this.turn) this.#say(this.turn, ask);
     });
@@ -242,17 +319,32 @@ export class Orchestrator extends EventEmitter {
     const p = this.pendingPermission;
     if (!p) return;
     this.pendingPermission = null;
-    p.resolve(optionId ? { outcome: { outcome: 'selected', optionId } } : { outcome: { outcome: 'cancelled' } });
+    if (!optionId) { p.resolve({ outcome: { outcome: 'cancelled' } }); this.emit('permission_resolved', null); return; }
+    const res = { outcome: { outcome: 'selected', optionId } };
+    // Kiro: a persistent ("always") choice echoes the consent scope + resource back.
+    const opt = p.options.find((o) => o.optionId === optionId);
+    const consent = p.req?._meta?.kiro?.consent;
+    if (opt?.kind === 'allow_always' && consent?.persistableConsent) {
+      const pc = consent.persistableConsent;
+      const scope = pc.scope ?? pc.defaultScope ?? (Array.isArray(pc.scopes) ? pc.scopes[0] : undefined);
+      res._meta = { kiro: { consent: { ...(scope ? { scope } : {}), resource: pc.resource ?? consent.resource } } };
+    }
+    p.resolve(res);
     this.emit('permission_resolved', optionId);
   }
+
+  /** Cancel a pending permission (e.g. before superseding a blocked turn). */
+  cancelPermission() { if (this.pendingPermission) this.resolvePermission(null); }
 
   #answerPermissionByVoice(text) {
     const p = this.pendingPermission;
     const yes = /\b(yes|yeah|yep|sure|ok(ay)?|go ahead|do it|kyllä|joo|juu|saa|okei|tee se)\b/i.test(text);
     const no = /\b(no|nope|don'?t|stop|cancel|ei|älä|peru)\b/i.test(text);
     const find = (k) => p.options.find((o) => o.kind === k)?.optionId;
-    if (yes && !no) this.resolvePermission(find('allow_once') ?? find('allow_always'));
-    else if (no) this.resolvePermission(find('reject_once') ?? null);
+    const always = /\b(always|aina|aina saa|ihan aina)\b/i.test(text);
+    if (yes && !no) { this.resolvePermission(always ? (find('allow_always') ?? find('allow_once')) : (find('allow_once') ?? find('allow_always'))); return true; }
+    if (no) { this.resolvePermission(find('reject_once') ?? null); return true; }
+    return false; // not an answer: treat as a new instruction
   }
 
   #metrics(turn) {

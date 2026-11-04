@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,8 +57,11 @@ test('language guess', () => {
   assert.equal(guessLang('Can you help me with this function?'), 'en');
 });
 
+const agents = [];
+after(() => agents.forEach((a) => a.stop()));
 function harness(extra = {}) {
   const acp = new AcpClient({ command: process.execPath, args: [resolve(HERE, 'mock-agent.js')] }).start();
+  agents.push(acp);
   const speech = new SilentSpeech({ wpm: 6000 });
   const orch = new Orchestrator({ acp, speech, config: { permissions: 'ask', ...extra } });
   return { acp, speech, orch };

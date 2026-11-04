@@ -1,6 +1,6 @@
 {
   "name": "vocalo",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Voice-first, TV-style conversational shell for ACP agents (Kiro CLI V3 by default).",
   "type": "module",
   "bin": {
@@ -13,8 +13,9 @@
     "start": "node src/index.js",
     "demo": "node src/index.js --no-speech --agent \"node test/mock-agent.js\"",
     "demo:voice": "node src/index.js --agent \"node test/mock-agent.js\"",
-    "test": "node --test test/*.test.js",
-    "test:py": "cd sidecar && python3 -m pytest -q tests"
+    "test": "node --test --test-timeout=20000 test/*.test.js",
+    "test:py": "cd sidecar && python3 -m pytest -q tests",
+    "doctor": "node src/index.js --doctor"
   },
   "license": "MIT"
 }
