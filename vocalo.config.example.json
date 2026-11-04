@@ -1,0 +1,12 @@
+{
+  "agent": {
+    "command": "/Users/YOU/.local/bin/kiro-cli",
+    "args": ["acp", "--agent-engine=v3"],
+    "model": null,
+    "effortLevel": "low"
+  },
+  "cwd": "/Users/YOU/code/some-project",
+  "speech": { "url": "ws://127.0.0.1:8765", "spawn": true },
+  "ui": { "aspect": "16:9", "eventsPort": 8766 },
+  "conversation": { "mode": "vad", "bargeIn": true, "permissions": "ask", "preamble": true, "defaultLang": "fi" }
+}

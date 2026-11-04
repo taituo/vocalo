@@ -1,0 +1,12 @@
+# Apple Silicon (macOS 15+), Python 3.10–3.12
+mlx>=0.25
+mlx-audio>=0.3        # VoxCPM2 + Kokoro (MLX)
+parakeet-mlx>=0.4     # Parakeet TDT 0.6B v3 (MLX)
+silero-vad>=5.1
+onnxruntime>=1.19     # Smart Turn v3.2
+huggingface_hub>=0.25
+sounddevice>=0.5
+soundfile>=0.12
+soxr>=0.5
+numpy>=1.26
+websockets>=13

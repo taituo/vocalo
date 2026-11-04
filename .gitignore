@@ -1,0 +1,6 @@
+node_modules/
+sidecar/.venv/
+sidecar/voices/
+__pycache__/
+vocalo.config.json
+*.log
