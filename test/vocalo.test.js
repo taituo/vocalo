@@ -122,3 +122,48 @@ test('voice answer resolves a permission request', async () => {
   assert.ok(subs.some((s) => /May I delete build folder/.test(s)), JSON.stringify(subs));
   assert.ok(subs.some((s) => /deleted it/.test(s)), JSON.stringify(subs));
 });
+
+test('chunker does not cut after abbreviations or list numbers', () => {
+  const out = [];
+  const c = new SpeechChunker({ onSpeak: (s) => out.push(s), firstMin: 5 });
+  for (const tok of 'Esim. tämä toimii hyvin ja nopeasti. Then e.g. this part works too. Done'.split(/(?<= )/)) c.push(tok);
+  c.flush();
+  assert.deepEqual(out, ['Esim. tämä toimii hyvin ja nopeasti.', 'Then e.g. this part works too.', 'Done']);
+});
+
+test('slow agent -> one cached filler, not counted as answer audio', async () => {
+  process.env.MOCK_FIRST_DELAY = '300';
+  const { acp, speech, orch } = harness({ fillerAfterMs: 100 });
+  speech.emit('ready', { cached: ['en.hmm', 'en.check', 'fi.hmm', 'fi.check'] });
+  await acp.initialize(); await acp.newSession({});
+  const fillers = [], subs = [];
+  let metrics;
+  orch.on('filler', (k) => fillers.push(k));
+  orch.on('assistant_subtitle', (s) => subs.push(s.text));
+  orch.on('metrics', (m) => (metrics = m));
+  const idle = new Promise((r) => orch.on('state', (s) => s === 'idle' && r()));
+  orch.userSaid('Explain photosynthesis', { endOfSpeechAt: Date.now() });
+  await idle;
+  acp.stop();
+  delete process.env.MOCK_FIRST_DELAY;
+  assert.deepEqual(fillers, ['en.hmm']);
+  assert.equal(subs[0], 'Hmm, let me think.');
+  assert.ok(metrics.fillerMs < metrics.voiceToVoiceMs, JSON.stringify(metrics));
+});
+
+test('a continued thought before any audio is merged into one prompt', async () => {
+  process.env.MOCK_FIRST_DELAY = '200';
+  process.env.MOCK_ECHO = '1';
+  const { acp, orch } = harness({ preamble: false });
+  await acp.initialize(); await acp.newSession({});
+  const subs = [];
+  orch.on('assistant_subtitle', (s) => subs.push(s.text));
+  orch.userSaid('Tell me about');
+  await new Promise((r) => setTimeout(r, 50));
+  const idle = new Promise((r) => orch.on('state', (s) => s === 'idle' && r()));
+  await orch.userSaid('black holes');
+  await idle;
+  acp.stop();
+  delete process.env.MOCK_FIRST_DELAY; delete process.env.MOCK_ECHO;
+  assert.deepEqual(subs, ['You said: Tell me about black holes.']);
+});

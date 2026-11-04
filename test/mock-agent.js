@@ -29,6 +29,12 @@ async function onPrompt(id, { sessionId, prompt }) {
   const reply = fi
     ? '[[scene bg="#0b3d2e" title="Fotosynteesi"]]Hyvä kysymys, kerron lyhyesti. Kasvit muuttavat valon energiaksi. Ne tarvitsevat vettä, hiilidioksidia ja auringonvaloa.'
     : '[[scene bg="#1b2a4a" title="Photosynthesis"]]Great question, here is the short version. Plants turn light into chemical energy. ```python\nprint("leaf")\n``` That snippet is on screen now.';
+  await sleep(Number(process.env.MOCK_FIRST_DELAY ?? 0));
+  if (cancelled) return send({ id, result: { stopReason: 'cancelled' } });
+  if (process.env.MOCK_ECHO) {
+    update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `You said: ${user}.` } });
+    return send({ id, result: { stopReason: 'end_turn' } });
+  }
   update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'tc1', title: 'Searching notes', status: 'in_progress' });
   await sleep(DELAY * 2);
   update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'tc1', status: 'completed' });

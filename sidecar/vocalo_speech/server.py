@@ -17,10 +17,19 @@ import time
 
 import numpy as np
 
-from .engines import SR, ParakeetSTT, SileroVAD, SmartTurn, TTSRouter, resample
+from .engines import P_PARTIAL, SR, ParakeetSTT, SileroVAD, SmartTurn, TTSRouter, resample
 
 OUT_SR = 48000
 FRAME = 512  # 32 ms @ 16 kHz (Silero's native frame)
+
+
+# Pre-rendered at startup; Node plays one only when the agent is slow to answer.
+FILLERS = {
+    "en.hmm": ("Hmm, let me think.", "en"),
+    "en.check": ("One moment, let me check.", "en"),
+    "fi.hmm": ("Hmm, hetkinen.", "fi"),
+    "fi.check": ("Hetki, katson.", "fi"),
+}
 
 
 def now_ms() -> int:
@@ -129,6 +138,8 @@ class Sidecar:
         self.say_q: asyncio.Queue = asyncio.Queue()
         self.gen = 0  # bumps on stop(): stale synth work is dropped
         self.frames: asyncio.Queue = asyncio.Queue()
+        self.cache: dict = {}
+        self.utt = 0  # utterance counter: partials from an older utterance are dropped
 
     # -------- plumbing
     def emit(self, type_, payload=None):
@@ -160,13 +171,21 @@ class Sidecar:
         self.tts = TTSRouter(en=self.args.tts_en, fi=self.args.tts_fi, voice_ref=self.args.voice_ref,
                              voxcpm_model=self.args.voxcpm_model, timesteps=self.args.timesteps)
         self.tts.warmup()
+        self.cache = {}
+        for key, (text, lang) in FILLERS.items():  # instant "thinking" phrases
+            try:
+                r = self.tts.synth(text, lang)
+                self.cache[key] = (r.audio, r.sr)
+            except Exception as e:
+                self.log(f"filler {key} failed: {e}")
         self.log(f"models ready in {time.perf_counter() - t:.1f}s")
 
     async def handler(self, ws):
         self.clients.add(ws)
         await ws.send(json.dumps({"type": "ready", "engines": {
             "stt": self.args.stt_model, "tts": {"en": self.args.tts_en, "fi": self.args.tts_fi},
-            "vad": "silero-v5", "turn": None if self.turn is None else "smart-turn-v3.2"}}))
+            "vad": "silero-v5", "turn": None if self.turn is None else "smart-turn-v3.2"},
+            "cached": sorted(self.cache)}))
         try:
             async for raw in ws:
                 self.on_command(json.loads(raw))
@@ -177,7 +196,12 @@ class Sidecar:
         t = m.get("type")
         if t == "say":
             self.player.enqueue(m["id"], m["text"])
-            self.say_q.put_nowait((self.gen, m["id"], m["text"], m.get("lang", "en")))
+            cached = self.cache.get(m.get("cached") or "")
+            if cached is not None:  # pre-rendered phrase: zero synthesis latency
+                self.player.append(m["id"], *cached)
+                self.player.finish(m["id"])
+            else:
+                self.say_q.put_nowait((self.gen, m["id"], m["text"], m.get("lang", "en")))
         elif t == "stop":
             self.stop_speaking()
         elif t == "mic":
@@ -234,14 +258,24 @@ class Sidecar:
         barge_frames = 0
         was_ptt = False
 
+        spec = None  # (n_frames, task): transcript started speculatively at the first pause
+
         async def finalize(end_ms):
-            nonlocal speech, in_speech, voiced, silent, pause_at, turn_checked
+            nonlocal speech, in_speech, voiced, silent, pause_at, turn_checked, spec
+            n = len(speech)
             audio = np.concatenate(speech) if speech else np.zeros(0, np.float32)
-            speech, in_speech, voiced, silent, pause_at, turn_checked = [], False, 0, 0, None, False
+            reuse = spec  # frames after the speculative cut are silence -> transcript still valid
+            speech, in_speech, voiced, silent, pause_at, turn_checked, spec = [], False, 0, 0, None, False, None
+            self.utt += 1
             self.vad.reset()
             self.emit("vad", {"speaking": False})
             t0 = time.perf_counter()
-            text = await asyncio.to_thread(self.stt.transcribe, audio)
+            if reuse is not None and n - reuse[0] <= int(a.max_silence_ms / 32) + 2:
+                text = await reuse[1]
+            else:
+                if reuse is not None:
+                    reuse[1].cancel()
+                text = await asyncio.to_thread(self.stt.transcribe, audio)
             self.emit("final", {"text": text, "sttMs": int((time.perf_counter() - t0) * 1000),
                                 "endOfSpeechAt": end_ms, "audioMs": int(len(audio) / SR * 1000)})
 
@@ -254,6 +288,7 @@ class Sidecar:
             if self.mode == "ptt":
                 if self.ptt_active:
                     if not was_ptt:
+                        last_partial = time.monotonic()
                         self.stop_speaking()
                         self.emit("vad", {"speaking": True})
                         speech = []
@@ -284,6 +319,7 @@ class Sidecar:
                         self.stop_speaking()
                         self.emit("barge_in", {})
                     in_speech = True
+                    last_partial = time.monotonic()  # first partial after partial_every, not instantly
                     speech = list(preroll)
                     preroll.clear()
                     silent = 0
@@ -297,14 +333,19 @@ class Sidecar:
                     pause_at = now_ms() - FRAME * 1000 // SR
             else:
                 silent, pause_at, turn_checked = 0, None, False
+                if spec is not None:  # user kept talking: speculative transcript is stale
+                    spec[1].cancel()
+                    spec = None
 
             pause_ms = silent * FRAME * 1000 / SR
-            # 1) short pause -> ask Smart Turn whether the thought is complete
+            # 1) short pause -> Smart Turn decides, while STT already runs on the GPU lane
             if pause_ms >= a.stop_ms and not turn_checked:
                 turn_checked = True
+                snapshot = np.concatenate(speech)
+                spec = (len(speech), asyncio.ensure_future(asyncio.to_thread(self.stt.transcribe, snapshot)))
                 done = True
                 if self.turn is not None:
-                    prob = await asyncio.to_thread(self.turn.complete_prob, np.concatenate(speech))
+                    prob = await asyncio.to_thread(self.turn.complete_prob, snapshot)
                     done = prob >= a.turn_threshold
                 if done:
                     await finalize(pause_at or now_ms())
@@ -321,9 +362,10 @@ class Sidecar:
                 await finalize(now_ms())
 
     async def _partial(self, audio):
+        utt = self.utt
         try:
-            text = await asyncio.to_thread(self.stt.transcribe, audio)
-            if text:
+            text = await asyncio.to_thread(self.stt.transcribe, audio, P_PARTIAL)
+            if text and utt == self.utt:  # never show a partial after its final
                 self.emit("partial", {"text": text})
         except Exception as e:
             self.emit("error", {"message": f"stt partial: {e}"})

@@ -21,7 +21,47 @@ from pathlib import Path
 import numpy as np
 
 SR = 16000
-MLX_LOCK = threading.Lock()  # one GPU lane: MLX STT + TTS never run concurrently
+
+# Priorities on the GPU lane (lower runs first)
+P_FINAL, P_TTS, P_PARTIAL, P_BG = 0, 1, 2, 3
+
+
+class GpuLane:
+    """All MLX work runs on ONE thread, in priority order.
+
+    Why: MLX arrays/streams are not safe to share across ad-hoc threads, and STT and
+    TTS fighting over the GPU makes both slow. A final transcript (the user just
+    stopped talking) must never wait behind a partial or a whole TTS sentence,
+    so TTS advances one generator step per job and a final can cut in between."""
+
+    def __init__(self):
+        import itertools, queue
+        self.q = queue.PriorityQueue()
+        self.seq = itertools.count()
+        self.thread = threading.Thread(target=self._loop, name="gpu-lane", daemon=True)
+        self.thread.start()
+
+    def _loop(self):
+        while True:
+            _, _, fn, box, done = self.q.get()
+            try:
+                box["result"] = fn()
+            except BaseException as e:  # noqa: BLE001 - re-raised in caller
+                box["error"] = e
+            done.set()
+
+    def run(self, fn, prio=P_BG):
+        if threading.current_thread() is self.thread:
+            return fn()  # re-entrant (e.g. warm-up inside a job)
+        box, done = {}, threading.Event()
+        self.q.put((prio, next(self.seq), fn, box, done))
+        done.wait()
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
+
+
+LANE = GpuLane()
 
 
 def _call(fn, *args, **kwargs):
@@ -95,29 +135,31 @@ class SmartTurn:
 class ParakeetSTT:
     def __init__(self, model_id: str = "mlx-community/parakeet-tdt-0.6b-v3"):
         from parakeet_mlx import from_pretrained
-        self.model = from_pretrained(model_id)
+        self.model = LANE.run(lambda: from_pretrained(model_id))
         self.transcribe(np.zeros(SR // 2, dtype=np.float32))  # warm-up / compile
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, prio: int = P_FINAL) -> str:
         if len(audio) < SR * 0.2:
             return ""
-        with MLX_LOCK:
-            try:
-                import mlx.core as mx
-                from parakeet_mlx.audio import get_logmel
-                mel = get_logmel(mx.array(audio.astype(np.float32)), self.model.preprocessor_config)
-                res = self.model.generate(mel)
-                res = res[0] if isinstance(res, (list, tuple)) else res
-                return res.text.strip()
-            except (ImportError, AttributeError, TypeError):
-                # fallback: file-based API
-                import soundfile as sf
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    sf.write(f.name, audio, SR)
-                    try:
-                        return self.model.transcribe(f.name).text.strip()
-                    finally:
-                        os.unlink(f.name)
+        return LANE.run(lambda: self._transcribe(audio), prio)
+
+    def _transcribe(self, audio: np.ndarray) -> str:
+        try:
+            import mlx.core as mx
+            from parakeet_mlx.audio import get_logmel
+            mel = get_logmel(mx.array(audio.astype(np.float32)), self.model.preprocessor_config)
+            res = self.model.generate(mel)
+            res = res[0] if isinstance(res, (list, tuple)) else res
+            return res.text.strip()
+        except (ImportError, AttributeError, TypeError):
+            # fallback: file-based API
+            import soundfile as sf
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                sf.write(f.name, audio, SR)
+                try:
+                    return self.model.transcribe(f.name).text.strip()
+                finally:
+                    os.unlink(f.name)
 
 
 # ---------------------------------------------------------------- TTS
@@ -134,7 +176,7 @@ class _MlxAudioTTS:
             from mlx_audio.tts.utils import load_model
         except ImportError:
             from mlx_audio.tts import load_model
-        self.model = load_model(model_id or self.model_id)
+        self.model = LANE.run(lambda: load_model(model_id or self.model_id))
         self.sr = int(getattr(self.model, "sample_rate", 24000))
 
     def _gen_kwargs(self, text: str, lang: str) -> dict:
@@ -144,13 +186,13 @@ class _MlxAudioTTS:
         """Yield (audio_piece, sample_rate). Uses mlx-audio's incremental mode when the
         installed version supports it, so playback can start before the chunk is done."""
         kw = dict(stream=True, streaming_interval=0.4, **self._gen_kwargs(text, lang))
-        gen = _call(self.model.generate, text=text, **kw)
+        gen = LANE.run(lambda: _call(self.model.generate, text=text, **kw), P_TTS)
+        done = object()
         while True:
-            with MLX_LOCK:  # hold the GPU lane per step, so a final STT can cut in between pieces
-                try:
-                    r = next(gen)
-                except StopIteration:
-                    return
+            # one step per lane job, so a final STT can cut in between pieces
+            r = LANE.run(lambda: next(gen, done), P_TTS)
+            if r is done:
+                return
             self.sr = int(getattr(r, "sample_rate", self.sr) or self.sr)
             yield np.asarray(r.audio, dtype=np.float32).reshape(-1), self.sr
 
@@ -188,11 +230,11 @@ class VoxCPM2TTS(_MlxAudioTTS):
     def _design_voice(self):
         import soundfile as sf
         self.ref.parent.mkdir(parents=True, exist_ok=True)
-        parts = []
-        with MLX_LOCK:
-            for r in _call(self.model.generate, text=self.REF_TEXT, instruct=self.VOICE_DESC,
-                           inference_timesteps=10, cfg_value=self.cfg):
-                parts.append(np.asarray(r.audio, dtype=np.float32).reshape(-1))
+        def design():
+            return [np.asarray(r.audio, dtype=np.float32).reshape(-1)
+                    for r in _call(self.model.generate, text=self.REF_TEXT, instruct=self.VOICE_DESC,
+                                   inference_timesteps=10, cfg_value=self.cfg)]
+        parts = LANE.run(design)
         sf.write(self.ref, np.concatenate(parts), self.sr)
         self.ref.with_suffix(".txt").write_text(self.REF_TEXT)
 

@@ -4,3 +4,4 @@ sidecar/voices/
 __pycache__/
 vocalo.config.json
 *.log
+.pytest_cache/

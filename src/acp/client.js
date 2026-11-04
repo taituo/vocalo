@@ -138,6 +138,15 @@ export class AcpClient extends EventEmitter {
     return res;
   }
 
+  /** Re-attach to an existing session after an agent restart (if the agent supports it). */
+  async loadSession({ sessionId = this.sessionId, cwd = this.cwd, mcpServers = [] } = {}) {
+    const res = await this.request('session/load', { sessionId, cwd, mcpServers, noReplay: true });
+    this.sessionId = sessionId;
+    return res;
+  }
+
+  get canLoadSession() { return !!this.capabilities?.loadSession; }
+
   /** Kiro V3: model/effort via session/set_config_option. Fails soft on other agents. */
   async setConfigOption(configId, value) {
     try {

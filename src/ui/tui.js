@@ -71,7 +71,13 @@ export class TvUI {
     this.out.write(`${RESET}\x1b[?25h\x1b[?1049l`);
   }
 
-  set(patch) { Object.assign(this.s, patch); this.dirty = true; }
+  set(patch) {
+    if (patch.notice) { // notices fade after a while instead of sticking forever
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = setTimeout(() => this.set({ notice: '' }), 8000);
+    }
+    Object.assign(this.s, patch); this.dirty = true;
+  }
 
   // Subtitle reveal paced to the audio duration -> words appear as they are spoken.
   subtitle(text, durationMs = 2000) {

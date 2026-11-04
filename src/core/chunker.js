@@ -5,6 +5,8 @@
 // Fenced code blocks are never spoken; they are emitted via onCode for the screen.
 
 const SENT_END = /[.!?…]["')\]]?(?=\s)|\n/g;
+// Never cut after these (EN + FI) or after a list number like "1."
+const NO_CUT = /(?:\b(?:e\.g|i\.e|etc|vs|mr|mrs|ms|dr|prof|st|no|approx|esim|ns|mm|jne|yms|ks|vrt|tms|n|klo|s|v)\.|\b\d{1,2}\.)$/i;
 const CLAUSE_END = /[,;:—–](?=\s)/g;
 const FENCE = '```';
 
@@ -80,6 +82,7 @@ export class SpeechChunker {
     SENT_END.lastIndex = 0;
     while ((m = SENT_END.exec(b))) {
       const end = m.index + m[0].length;
+      if (m[0] !== '\n' && NO_CUT.test(b.slice(Math.max(0, end - 8), end))) continue;
       if (end >= (first ? 2 : min)) return end;
     }
     if (first) {

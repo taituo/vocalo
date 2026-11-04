@@ -21,7 +21,8 @@ export class SpeechSidecar extends EventEmitter {
     this.queue = [];
   }
 
-  async start({ retries = 120, delayMs = 500 } = {}) {
+  // First run downloads several GB of models, so wait patiently (default 15 min).
+  async start({ retries = 1800, delayMs = 500 } = {}) {
     if (this.spawnCmd) {
       const [cmd, ...args] = this.spawnCmd;
       this.proc = spawn(cmd, args, { cwd: this.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -59,7 +60,7 @@ export class SpeechSidecar extends EventEmitter {
     if (this.ws?.readyState === 1) this.ws.send(s); else this.queue.push(s);
   }
 
-  say(id, text, lang) { this.send({ type: 'say', id, text, lang }); }
+  say(id, text, lang, cached) { this.send({ type: 'say', id, text, lang, ...(cached ? { cached } : {}) }); }
   stop() { this.send({ type: 'stop' }); }
   mic(enabled) { this.send({ type: 'mic', enabled }); }
   mode(mode) { this.send({ type: 'mode', mode }); }

@@ -13,7 +13,8 @@ export class Orchestrator extends EventEmitter {
     super();
     this.acp = acp;
     this.speech = speech;
-    this.config = { bargeIn: true, permissions: 'ask', preamble: true, defaultLang: 'en', ...config };
+    this.config = { bargeIn: true, permissions: 'ask', preamble: true, defaultLang: 'en', fillerAfterMs: 1400, ...config };
+    this.cachedPhrases = new Set();
     this.state = State.IDLE;
     this.turn = null;          // active turn object
     this.turnSeq = 0;
@@ -32,6 +33,7 @@ export class Orchestrator extends EventEmitter {
     speech.on('say_start', (m) => this.#onSayStart(m));
     speech.on('say_end', (m) => { this.sayIds.delete(m.id); this.#maybeFinish(); });
     speech.on('idle', () => this.#onSpeechIdle());
+    speech.on('ready', (m) => { for (const k of m.cached ?? []) this.cachedPhrases.add(k); });
   }
 
   #setState(s) {
@@ -57,7 +59,13 @@ export class Orchestrator extends EventEmitter {
     this.lastLang = meta.lang || guessLang(text, this.lastLang);
     this.emit('user_final', text);
     if (this.pendingPermission) return this.#answerPermissionByVoice(text);
-    if (this.turn) await this.interrupt('new-utterance');
+    if (this.turn) {
+      // The user kept talking before Vocalo said anything: it's one thought, not two.
+      const prev = this.turn;
+      const unheard = !prev.metrics.firstAudioAt && !prev.toolUsed;
+      await this.interrupt('new-utterance');
+      if (unheard) text = `${prev.userText} ${text}`;
+    }
     this.#startTurn(text, meta);
   }
 
@@ -70,6 +78,8 @@ export class Orchestrator extends EventEmitter {
       chunk: 0,
       cancelled: false,
       text: '',
+      userText: text,
+      fillerSent: false,
     };
     turn.chunker = new SpeechChunker({
       onSpeak: (s) => this.#say(turn, s),
@@ -81,6 +91,7 @@ export class Orchestrator extends EventEmitter {
     });
     this.turn = turn;
     this.#setState(State.THINKING);
+    turn.fillerTimer = setTimeout(() => this.#filler(turn, 'hmm'), this.config.fillerAfterMs);
 
     let promptText = text;
     if (!this.preambleSent) { promptText = VOICE_PREAMBLE + text; this.preambleSent = true; }
@@ -112,6 +123,9 @@ export class Orchestrator extends EventEmitter {
         this.emit('thought', u.content?.text ?? '');
         break;
       case 'tool_call':
+        turn.toolUsed = true;
+        if (!turn.metrics.firstSayAt) this.#filler(turn, 'check');
+      // fallthrough
       case 'tool_call_update':
         this.emit('tool', { id: u.toolCallId, title: u.title, kind: u.kind, status: u.status });
         break;
@@ -120,11 +134,28 @@ export class Orchestrator extends EventEmitter {
     }
   }
 
+  /** Pre-rendered "hmm, one moment" when the agent is slow: zero TTS latency, once per turn. */
+  #filler(turn, kind) {
+    if (turn.cancelled || turn.ended || turn.fillerSent || turn.metrics.firstSayAt) return;
+    if (kind === 'hmm' && turn.metrics.firstTokenAt) return; // words are already flowing
+    const key = `${this.lastLang === 'fi' ? 'fi' : 'en'}.${kind}`;
+    if (!this.cachedPhrases.has(key)) return;
+    turn.fillerSent = true;
+    clearTimeout(turn.fillerTimer);
+    const text = { 'en.hmm': 'Hmm, let me think.', 'en.check': 'One moment, let me check.', 'fi.hmm': 'Hmm, hetkinen.', 'fi.check': 'Hetki, katson.' }[key];
+    const id = `${turn.id}.f`;
+    this.sayIds.add(id);
+    this.speech.say(id, text, this.lastLang, key);
+    this.emit('filler', key);
+  }
+
   #say(turn, text) {
     if (turn.cancelled) return;
+    clearTimeout(turn.fillerTimer);
     const id = `${turn.id}.${++turn.chunk}`;
     const lang = guessLang(text, this.lastLang);
     if (!turn.metrics.firstSayAt) turn.metrics.firstSayAt = Date.now();
+    turn.spoken = (turn.spoken || 0) + 1;
     this.sayIds.add(id);
     this.speech.say(id, text, lang);
   }
@@ -132,7 +163,8 @@ export class Orchestrator extends EventEmitter {
   #onSayStart({ id, text, durationMs }) {
     const turn = this.turn;
     if (!turn || !id?.startsWith(`${turn.id}.`)) return;
-    if (!turn.metrics.firstAudioAt) {
+    if (id.endsWith('.f')) { turn.metrics.fillerAt ??= Date.now(); }
+    else if (!turn.metrics.firstAudioAt) {
       turn.metrics.firstAudioAt = Date.now();
       this.emit('metrics', this.#metrics(turn));
     }
@@ -141,6 +173,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   #onTurnEnd(turn, stopReason) {
+    clearTimeout(turn.fillerTimer);
     if (turn.cancelled) { turn.ended = true; return; } // interrupt() owns state from here
     if (this.turn !== turn) return;
     turn.scene.flush();
@@ -173,6 +206,7 @@ export class Orchestrator extends EventEmitter {
     this.sayIds.clear();
     if (!turn) return;
     turn.cancelled = true;
+    clearTimeout(turn.fillerTimer);
     this.emit('interrupted', reason);
     if (!turn.ended) {
       this.acp.cancel();
@@ -225,6 +259,8 @@ export class Orchestrator extends EventEmitter {
     const m = turn.metrics;
     const d = (a, b) => (a && b ? b - a : null);
     return {
+      turn: turn.id,
+      fillerMs: d(m.endOfSpeechAt, m.fillerAt),
       sttMs: m.sttMs,
       agentFirstTokenMs: d(m.promptAt, m.firstTokenAt),
       ttsFirstAudioMs: d(m.firstSayAt, m.firstAudioAt),

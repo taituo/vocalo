@@ -30,6 +30,7 @@ npm start
 
 Try it without a mic or Kiro: `npm run demo` (mock ACP agent, typed input, timed subtitles).
 Mic and TTS with the mock agent: `npm run demo:voice`.
+Tests (no Mac or models needed): `npm test` and `npm run test:py`.
 
 ### Controls
 | key | action |
@@ -66,11 +67,32 @@ If VoxCPM2 is under ~1.2× realtime on your Mac:
 | step | target | how |
 |---|---|---|
 | end-of-speech detect | 200–250 ms | VAD `stop_ms=200` + Smart Turn instead of a 700 ms+ silence timeout |
-| STT final | 50–120 ms | Parakeet runs on the whole utterance (partials keep it warm) |
-| agent first token | 400–900 ms | Kiro: choose a fast model/low effort (`agent.model`, `effortLevel`); voice preamble keeps answers short |
+| STT final | ≈0 ms extra | **speculative STT**: Parakeet starts at the first pause *in parallel* with Smart Turn; if the turn is complete, that transcript is the final |
+| agent first token | 400–900 ms | the big one, see the playbook below |
 | TTS first audio | 150–400 ms | first chunk released at the first clause; streamed synthesis; next sentence synthesized while the current one plays |
+| perceived gap | < 1.5 s always | **instant filler**: if the agent has said nothing after 1.4 s (or starts a tool), a pre-rendered "Hmm, hetkinen." / "One moment, let me check." plays with zero TTS cost |
 
-The footer shows live `voice→voice · stt · agent · tts` numbers for every turn, so tuning is measurable.
+The footer shows live `voice→voice · stt · agent · tts` numbers for every turn. Run with
+`--metrics turns.jsonl` to log every turn and tune on real data.
+
+### Latency playbook (in order of impact)
+1. **Pick a fast agent model for voice.** `node src/index.js --list-models` prints what Kiro offers. Put a fast one in
+   `agent.model` and use `effortLevel: "low"`. Agent time-to-first-token is usually 60–80 % of the total.
+2. **Keep the voice project lean.** Every MCP server and big steering file adds prompt tokens on every turn.
+   Give voice its own Kiro agent/project with only the tools it needs.
+3. **Benchmark TTS on your Mac** (`--bench`). You want ≥ 1.3× realtime. If VoxCPM2 is slower, use `--timesteps 5`,
+   the 4-bit model, or Kokoro for English.
+4. **One GPU lane.** STT and TTS share one prioritized MLX thread: a final transcript always jumps ahead of TTS
+   and partials. This avoids GPU contention, which is the classic cause of a "sometimes laggy" feel.
+5. Tune endpointing per person: `--stop-ms 160` (snappier) or `--turn-threshold 0.6` (fewer cut-offs).
+
+### What makes it feel good (not just fast)
+- A continued thought is merged. If you pause, Vocalo starts thinking, and you keep talking before it has
+  said anything, both parts go to the agent as **one** prompt and the half-thought is cancelled.
+- Barge-in stops the audio within one 32 ms frame. The agent turn is cancelled per Kiro's rules: cancel, wait
+  for the prompt response, then send the new prompt.
+- Subtitles appear when their audio starts, not when the text arrives.
+- The agent process is restarted and re-attached to the same session (`session/load`) if it crashes.
 
 ## TV harness: stage directions
 

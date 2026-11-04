@@ -24,6 +24,8 @@ const { values: argv } = parseArgs({
     permissions: { type: 'string' },        // ask | allow | deny
     model: { type: 'string' },
     log: { type: 'string' },
+    metrics: { type: 'string' },            // append one JSON line per turn (for latency tuning)
+    'list-models': { type: 'boolean', default: false },
   },
 });
 
@@ -51,6 +53,7 @@ if (argv.model) cfg.agent.model = argv.model;
 if (argv['spawn-sidecar'] !== undefined) cfg.speech.spawn = argv['spawn-sidecar'];
 
 const logFile = argv.log;
+const metricsFile = argv.metrics ?? fileCfg.metricsFile;
 const log = (...a) => { if (logFile) appendFileSync(logFile, `[${new Date().toISOString()}] ${a.join(' ')}\n`); };
 
 const ui = new TvUI({ aspect: cfg.ui.aspect });
@@ -87,7 +90,10 @@ orch.on('tool', (t) => {
   if (title) ui.set({ tool: t.status === 'completed' ? '' : `${title}${t.status ? ' · ' + t.status.replace('_', ' ') : ''}` });
   events.publish('tool', { ...t, title });
 });
-orch.on('metrics', (m) => { ui.set({ metrics: m }); events.publish('metrics', m); log('metrics', JSON.stringify(m)); });
+orch.on('metrics', (m) => {
+  ui.set({ metrics: m }); events.publish('metrics', m); log('metrics', JSON.stringify(m));
+  if (metricsFile && m.voiceToVoiceMs != null) appendFileSync(metricsFile, JSON.stringify({ t: new Date().toISOString(), ...m }) + '\n');
+});
 orch.on('permission', ({ title, options }) => { ui.set({ permission: title }); events.publish('permission', { title, options }); });
 orch.on('permission_resolved', () => ui.set({ permission: null }));
 orch.on('turn_end', ({ stopReason, text }) => log('assistant:', JSON.stringify(text), stopReason));
@@ -120,7 +126,24 @@ ui.on('text', (t) => orch.userSaid(t, {}))
   })
   .on('quit', shutdown);
 
+// ---- agent crash recovery: restart, re-attach to the same session if possible ----
+let shuttingDown = false, restarts = 0;
+acp.on('exit', async (code) => {
+  if (shuttingDown) return;
+  if (++restarts > 5) return ui.set({ notice: `agent exited (${code}); giving up after 5 restarts` });
+  ui.set({ notice: `agent exited (${code}) — restarting…` });
+  await new Promise((r) => setTimeout(r, 500 * restarts));
+  try {
+    acp.start();
+    await acp.initialize();
+    if (acp.sessionId && acp.canLoadSession) await acp.loadSession({ cwd: cfg.cwd });
+    else await acp.newSession({ cwd: cfg.cwd, mcpServers: [] });
+    ui.set({ notice: 'agent reconnected' });
+  } catch (err) { ui.set({ notice: `agent restart failed: ${err.message}` }); }
+});
+
 function shutdown() {
+  shuttingDown = true;
   ui.stop(); speech.close(); acp.stop(); events.close();
   process.exit(0);
 }
@@ -128,6 +151,15 @@ process.on('SIGINT', shutdown);
 process.on('uncaughtException', (e) => { log('fatal', e.stack); ui.stop(); console.error(e); process.exit(1); });
 
 // ---- boot ----
+if (argv['list-models']) {
+  // Prints what this agent offers so you can pick the fastest model for voice.
+  acp.start();
+  await acp.initialize();
+  const sess = await acp.newSession({ cwd: cfg.cwd, mcpServers: [] });
+  const { sessionId, ...rest } = sess;
+  console.log(JSON.stringify({ agent: acp.agentInfo, session: rest }, null, 2));
+  acp.stop(); events.close(); process.exit(0);
+}
 ui.start();
 ui.set({ title: 'Vocalo', caption: 'warming up voice + agent…', mode });
 try {
@@ -138,6 +170,7 @@ try {
   await acp.newSession({ cwd: cfg.cwd, mcpServers: [] });
   if (cfg.agent.model) await acp.setConfigOption('model', cfg.agent.model);
   if (cfg.agent.effortLevel) await acp.setConfigOption('effortLevel', cfg.agent.effortLevel);
+  ui.set({ caption: 'agent ready · loading speech models (first run downloads them)…' });
   await sp;
   speech.mode(mode);
   const name = acp.agentInfo?.title || acp.agentInfo?.name || cfg.agent.command;
