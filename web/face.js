@@ -173,17 +173,25 @@ const STATE = {
 };
 
 export class Face {
-  constructor(container, { lite = false } = {}) {
+  /**
+   * @param {HTMLElement} container
+   * @param {object} [o]
+   * @param {boolean} [o.lite]          lower resolution
+   * @param {string}  [o.frag]          alternative fragment shader (same uniforms), e.g. the PS1 robot
+   * @param {number}  [o.pixelHeight]   render at this many pixels tall and upscale with hard pixels (retro)
+   */
+  constructor(container, { lite = false, frag = FRAG, pixelHeight = 0 } = {}) {
     this.el = container;
     const c = this.canvas = document.createElement('canvas');
-    c.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;';
+    c.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;' + (pixelHeight ? 'image-rendering:pixelated;' : '');
+    this.pixelHeight = pixelHeight;
     container.append(c);
     const gl = this.gl = c.getContext('webgl2', { premultipliedAlpha: true, alpha: true, antialias: false });
     if (!gl) throw new Error('WebGL2 unavailable');
     const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
       if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
     const prog = this.prog = gl.createProgram();
-    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VERT)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FRAG));
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VERT)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, frag));
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
     gl.useProgram(prog);
@@ -191,7 +199,7 @@ export class Face {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
     const loc = gl.getAttribLocation(prog, 'a'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     this.u = {};
-    for (const n of ['res', 'time', 'gaze', 'blink', 'lid', 'smile', 'brow', 'open', 'wide', 'breath', 'energy', 'think', 'listen', 'tilt', 'nod', 'lean', 'alert', 'c0', 'c1', 'c2', 'c3'])
+    for (const n of ['res', 'time', 'gaze', 'blink', 'lid', 'smile', 'brow', 'open', 'wide', 'breath', 'energy', 'think', 'listen', 'tilt', 'nod', 'lean', 'alert', 'c0', 'c1', 'c2', 'c3', 'bands', 'mic', 'sway'])
       this.u[n] = gl.getUniformLocation(prog, `u_${n}`);
     this.scale = lite ? 0.6 : Math.min(2, devicePixelRatio || 1);
 
@@ -200,6 +208,8 @@ export class Face {
       lid: new Spring(0.18, 7), smile: new Spring(0.28, 4), brow: new Spring(0.1, 5), think: new Spring(0, 3), listen: new Spring(0, 4),
       gx: new Spring(0, 14), gy: new Spring(0, 14), tilt: new Spring(0, 3), lean: new Spring(0, 3), nod: new Spring(0, 9),
       open: new Spring(0, 28), wide: new Spring(0.3, 18), energy: new Spring(0, 12), alert: new Spring(0, 6),
+      sway: new Spring(0, 5),                       // antenna: lags behind head motion, wobbles on nods
+      b0: new Spring(0, 30), b1: new Spring(0, 30), b2: new Spring(0, 30), mic: new Spring(0, 14),
     };
     this.state = 'idle';
     this.blink = 0; this.nextBlink = performance.now() + 1500; this.blinkPhase = -1; this.doubleBlink = false;
@@ -220,7 +230,7 @@ export class Face {
   setLevels(mic = 0, out = 0, bands) { this.mic = mic; this.out = out; if (bands) this.bands = bands; }
   setColors(c4) { this.colors = c4; }                         // [[r,g,b] x4] 0..1
   lookAt(x, y, ms = 1500) { this.look = { x, y, until: performance.now() + ms }; }
-  nod(strength = 1) { const now = performance.now(); if (now - this.lastNod < 900) return; this.lastNod = now; this.s.nod.kick(-5 * strength); }
+  nod(strength = 1) { const now = performance.now(); if (now - this.lastNod < 900) return; this.lastNod = now; this.s.nod.kick(-5 * strength); this.s.sway.kick(3 * strength); }
   delight(ms = 1400) { this.smileBoost = performance.now() + ms; }   // e.g. a finished task
 
   #behave(now, dt) {
@@ -239,6 +249,9 @@ export class Face {
     s.think.target = think; s.listen.target = listen; s.tilt.target = tilt + (this.state === 'idle' ? Math.sin(now / 5300) * 0.03 : 0);
     s.lean.target = lean * (0.4 + this.mic);
     s.alert.target = 0;
+    s.sway.target = -(s.gx.v * 0.6) - s.tilt.v * 2;       // antenna trails the head's turn
+    s.b0.target = this.state === 'speaking' ? lo : 0; s.b1.target = this.state === 'speaking' ? mid : 0; s.b2.target = this.state === 'speaking' ? hi : 0;
+    s.mic.target = this.mic;
 
     // backchannel nods: while you talk, nod softly when your voice dips after a phrase
     if (this.state === 'listening') {
@@ -276,7 +289,8 @@ export class Face {
     this.#behave(now, dt);
     for (const sp of Object.values(this.s)) sp.step(dt);
     const { gl, u, s, canvas } = this;
-    const w = Math.round(canvas.clientWidth * this.scale), h = Math.round(canvas.clientHeight * this.scale);
+    const k = this.pixelHeight ? this.pixelHeight / Math.max(1, canvas.clientHeight) : this.scale;
+    const w = Math.max(8, Math.round(canvas.clientWidth * k)), h = Math.max(8, Math.round(canvas.clientHeight * k));
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
     const t = (now - this.t0) / 1000;
     gl.uniform2f(u.res, w, h); gl.uniform1f(u.time, t);
@@ -288,6 +302,9 @@ export class Face {
     gl.uniform1f(u.think, Math.max(0, s.think.v)); gl.uniform1f(u.listen, Math.max(0, s.listen.v));
     gl.uniform1f(u.tilt, s.tilt.v); gl.uniform1f(u.nod, s.nod.v); gl.uniform1f(u.lean, Math.max(0, s.lean.v));
     gl.uniform1f(u.alert, Math.max(0, s.alert.v));
+    if (u.bands) gl.uniform3f(u.bands, Math.max(0, s.b0.v), Math.max(0, s.b1.v), Math.max(0, s.b2.v));
+    if (u.mic) gl.uniform1f(u.mic, Math.max(0, s.mic.v));
+    if (u.sway) gl.uniform1f(u.sway, s.sway.v);
     this.colors.forEach((c, i) => gl.uniform3f(u[`c${i}`], c[0], c[1], c[2]));
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.drawArrays(gl.TRIANGLES, 0, 3);

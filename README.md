@@ -8,8 +8,11 @@ broadcast-style subtitles, an audio-reactive visual, the agent's plan, and its c
 Speech runs **locally on your Mac** (Apple Silicon). The agent runs **on the Mac or on a server over SSH**:
 you talk on the laptop, and files, edits, git and Kiro sessions stay on the server.
 
-![Vocalo's face: idle · listening · thinking · speaking](docs/screens/face-states.jpg)
-*Vocalo's face — idle · listening · thinking · speaking.* ▶ [20-second demo video](docs/vocalo-demo.mp4)
+![Voxi, the PS1-style robot: idle · listening · thinking · speaking](docs/screens/bot-states.jpg)
+*Voxi, the default avatar — idle · listening · thinking · speaking.* ▶ [20-second demo video](docs/vocalo-demo.mp4)
+
+![The light face (night theme)](docs/screens/face-states.jpg)
+*Alternative avatar: the light face, with the night theme.*
 
 | speaking | agent working (plan) | code change | permission | push-to-talk, 4:3 |
 |---|---|---|---|---|
@@ -73,7 +76,7 @@ The stage is a web page that Vocalo serves on `http://127.0.0.1:8766`, opened as
 - `?lite` renders at lower resolution (old GPUs, battery). If WebGL is unavailable, a CSS fallback is used.
 
 **Keys:** hold `Space` = push-to-talk (works in hands-free mode too) · `T` type · `:` or `⌘K` command palette · `Esc` interrupt ·
-`M` mute · `V` face ⇄ orb · `R` 16:9 ⇄ 4:3 · `F` fullscreen · `C` clear · `P` plan · `D` latency stats · `Y/A/N` permission · `O` open sign-in page.
+`M` mute · `V` avatar (bot/face/orb) · `R` 16:9 ⇄ 4:3 · `F` fullscreen · `C` clear · `P` plan · `D` latency stats · `Y/A/N` permission · `O` open sign-in page.
 
 Global hotkey without Swift: bind a key in Hammerspoon or Karabiner to `curl -XPOST localhost:8766/command -d '{"type":"ptt","active":true}'`.
 
@@ -278,7 +281,7 @@ Model weights have their own licenses; check each model card before shipping any
 | `src/core/chunker.js` · `scene.js` · `lang.js` | token stream → speakable chunks · `[[stage tags]]` · FI/EN guess |
 | `src/config.js` | defaults ← file ← profile ← CLI |
 | `src/ui/events.js` · `launch.js` · `tui.js` | stage server · app window launcher · terminal UI |
-| `web/` | the stage (no build step; shaders served from `node_modules`) · `face.js` the living face · `face-lab.html` tuning page |
+| `web/` | the stage (no build step; shaders served from `node_modules`) · `bot.js` PS1 robot · `face.js` light face + shared behaviour engine · `face-lab.html` tuning page |
 | `desktop/` | Tauri v2 wrapper (`npm run build` on the Mac) |
 | `sidecar/vocalo_speech/` | mic, VAD, Smart Turn, STT, TTS, player, levels, `--bench` |
 | `steering/vocalo.md` · `personas/` | Kiro steering · profile personas |

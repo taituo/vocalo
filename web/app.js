@@ -4,14 +4,21 @@
 //   orb         SmokeRing      breathes with the mic (listening) / the voice (speaking)
 //   border      PulsingBorder  "attention": recording (push-to-talk) or waiting for permission
 import { Face, FACE_PALETTES } from './face.js';
+import { createBot, BOT_PALETTES } from './bot.js';
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
 const S = {
   state: 'idle', mic: 0, out: 0, lvl: 0, aspect: localStorage.getItem('vocalo.aspect') || '16:9',
   base: '#1b2a4a', plan: [], panel: null, permission: null, ptt: false, pttDown: false, stats: false, bands: [0, 0, 0],
-  avatar: new URLSearchParams(location.search).get('avatar') || localStorage.getItem('vocalo.avatar') || null,
+  avatar: null,
+  // user's explicit choice (URL or V key) beats the server config; config beats the default
+  avatarPref: new URLSearchParams(location.search).get('avatar') || localStorage.getItem('vocalo.avatar') || null,
+  cfgAvatar: null, ready: false,
 };
-let face = null;
+let face = null, bot = null;
+const AVATARS = ['bot', 'face', 'orb'];
+/** the avatar currently on stage (bot or face share one API) */
+const avatar = () => (S.avatar === 'bot' ? bot : S.avatar === 'face' ? face : null);
 
 // ------------------------------------------------------------------ comms
 const send = (cmd) => fetch('/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(cmd) }).catch(() => {});
@@ -31,11 +38,11 @@ function connect() {
 function handle(ev, replay = false) {
   switch (ev.type) {
     case 'level': S.mic = ev.mic ?? 0; S.out = ev.out ?? 0; if (ev.bands) S.bands = ev.bands; break;
-    case 'turn_end': if (!replay && ev.stopReason === 'end_turn' && ev.tools) face?.delight(); break;
+    case 'turn_end': if (!replay && ev.stopReason === 'end_turn' && ev.tools) avatar()?.delight(); break;
     case 'state': setState(ev.state); break;
     case 'subtitle': if (!replay) subtitle(ev.text, ev.durationMs); else $('#sub-assistant').textContent = ev.text; break;
     case 'user_partial': userLine(ev.text, true); break;
-    case 'user': userLine(ev.text, false); if (!replay) face?.nod(1); break;
+    case 'user': userLine(ev.text, false); if (!replay) avatar()?.nod(1); break;
     case 'scene': scene(ev); break;
     case 'code': showPanel({ kind: 'code', title: firstLineTitle(ev.code), body: ev.code }); break;
     case 'diff': showPanel({ kind: 'diff', title: ev.path, rows: ev.rows }); break;
@@ -51,14 +58,18 @@ function handle(ev, replay = false) {
     case 'ptt': S.ptt = !!ev.active; attention(); break;
     case 'steered': toast(`↪ ${ev.text}`); break;
     case 'profile': if (ev.name && !replay) toast(`profile: ${ev.name}`); break;
-    case 'config': if (!S.avatarChosen && ev.avatar) setAvatar(ev.avatar, false); break;
+    case 'config':
+      if (ev.theme) S.theme = ev.theme;
+      if (ev.avatar) S.cfgAvatar = ev.avatar;
+      if (S.ready && !S.avatarPref && ev.avatar) setAvatar(ev.avatar, false); else applyTheme();
+      break;
     case 'connection': $('#caption').textContent = ev.caption ?? $('#caption').textContent; break;
   }
 }
 
 function setState(st) {
   S.state = st;
-  face?.setState(st);
+  face?.setState(st); bot?.setState(st);
   stage.dataset.state = st;
   $('#live').hidden = st !== 'speaking';
   $('#chip-state').textContent = { idle: 'ready', listening: '● listening', thinking: '◌ thinking', speaking: '◉ speaking' }[st] ?? st;
@@ -127,7 +138,7 @@ function showPanel(p) {
   }
   $('#panel').hidden = false;
   stage.classList.add('has-panel');
-  face?.lookAt(-0.85, 0.75, 2600); // glance at what's being shown
+  avatar()?.lookAt(-0.85, 0.75, 2600); // glance at what's being shown
 }
 function hidePanel() { S.panel = null; $('#panel').hidden = true; stage.classList.remove('has-panel'); }
 $('#panel-close').onclick = hidePanel;
@@ -209,10 +220,19 @@ function toast(text) {
 function attention() { stage.dataset.attn = S.ptt || S.pttDown || S.permission || !$('#openurl').hidden ? '1' : '0'; }
 
 // ------------------------------------------------------------------ keyboard
+// day theme (pastel, PS1 robot) vs night theme (dark stage, light face/orb); "auto" follows the avatar
+function applyTheme() {
+  const th = S.theme && S.theme !== 'auto' ? S.theme : S.avatar === 'bot' ? 'day' : 'night';
+  if (document.documentElement.dataset.theme !== th) S.snapPalette = true;  // jump, don't fade dark->pastel
+  document.documentElement.dataset.theme = th;
+}
 function setAvatar(a, remember = true) {
-  if (!face && a === 'face') a = 'orb';
+  if (!AVATARS.includes(a)) a = 'bot';
+  if (a === 'bot' && !bot) a = face ? 'face' : 'orb';
+  if (a === 'face' && !face) a = 'orb';
   S.avatar = a; document.documentElement.dataset.avatar = a;
-  if (remember) { S.avatarChosen = true; try { localStorage.setItem('vocalo.avatar', a); } catch {} }
+  applyTheme();
+  if (remember) { S.avatarPref = a; try { localStorage.setItem('vocalo.avatar', a); } catch {} }
   orbMount?.setSpeed(a === 'orb' ? 0.5 : 0);
 }
 function setAspect(a) { S.aspect = a; stage.dataset.aspect = a; try { localStorage.setItem('vocalo.aspect', a); } catch {} }
@@ -240,7 +260,7 @@ addEventListener('keydown', (e) => {
     case 'p': $('#plan').hidden = !$('#plan').hidden || !S.plan.length; return;
     case 'o': if (!$('#openurl').hidden) $('#openurl-btn').click(); return;
     case '?': return command('help');
-    case 'v': return setAvatar(S.avatar === 'face' ? 'orb' : 'face');
+    case 'v': return setAvatar(AVATARS[(AVATARS.indexOf(S.avatar) + 1) % AVATARS.length]);
   }
 });
 addEventListener('keyup', (e) => { if (e.code === 'Space' && S.pttDown) { S.pttDown = false; attention(); send({ type: 'ptt', active: false }); } });
@@ -269,6 +289,12 @@ const ORB = {
 };
 function paletteFor(base, state) {
   const [h0, s0, l0] = rgbToHsl(hexToRgb(base));
+  if (document.documentElement.dataset.theme === 'day') {          // soft pastel sky
+    const tint = { idle: 0, listening: 30, thinking: 270, speaking: 195 }[state] ?? 0;
+    const h = state === 'idle' ? h0 : h0 * 0.5 + tint * 0.5;
+    // analogous hues only: complementary pastels mix to grey
+    return [hsl(h + 5, 0.85, 0.87), hsl(h + 35, 0.9, 0.85), hsl(h - 30, 0.85, 0.88), hsl(h + 60, 0.8, 0.9)];
+  }
   const [shift, sat, light] = STATE_TINT[state] ?? STATE_TINT.idle;
   const h = state === 'idle' ? h0 : h0 * 0.55 + shift * 0.45;
   const s = Math.min(1, Math.max(0.35, s0) * sat);
@@ -277,11 +303,13 @@ function paletteFor(base, state) {
 }
 
 // face palette per state: [deep, body, rim, eyes], eased in frame()
-let faceCur = null;
-function faceColors(st) {
-  const goal = (FACE_PALETTES[st] ?? FACE_PALETTES.idle)(rgbToHsl(hexToRgb(S.base))[0]);
-  faceCur = faceCur ? faceCur.map((c, i) => c.map((v, j) => lerp(v, goal[i][j], 0.05))) : goal;
-  return faceCur;
+let avCur = null, avCurFor = null;
+function avatarColors(st) {
+  const P = S.avatar === 'bot' ? BOT_PALETTES : FACE_PALETTES;
+  const goal = (P[st] ?? P.idle)(rgbToHsl(hexToRgb(S.base))[0]);
+  if (avCurFor !== S.avatar) { avCur = goal; avCurFor = S.avatar; }
+  avCur = avCur.map((c, i) => c.map((v, j) => lerp(v, goal[i][j], 0.06)));
+  return avCur;
 }
 let bgMount, orbMount, borderMount, sizing;
 // ?lite renders at lower resolution (software GL, old GPUs, battery saver)
@@ -302,9 +330,11 @@ async function initShaders() {
       u_colorBack: [0, 0, 0, 0], u_colors: ORB.idle(200), u_colorsCount: 2, u_noiseScale: 3, u_noiseIterations: 8,
       u_thickness: 0.6, u_radius: 0.25, u_innerShape: 0.7, u_noiseTexture: noise, ...sz({ fit: 'contain', scale: 0.62 }),
     }, { premultipliedAlpha: true, alpha: true }, 0.5, 0, PX[0], PX[1]);
-    try { face = new Face($('#face'), { lite: LITE }); face.setState(S.state); window.__vocalo = { face, S }; } catch (e) { console.warn('face unavailable', e); S.avatar = 'orb'; }
-    S.avatarChosen = !!S.avatar;
-    setAvatar(S.avatar || 'face', false);
+    try { bot = createBot($('#bot'), { lite: LITE }); bot.setState(S.state); } catch (e) { console.warn('bot unavailable', e); }
+    try { face = new Face($('#face'), { lite: LITE }); face.setState(S.state); } catch (e) { console.warn('face unavailable', e); }
+    window.__vocalo = { face, bot, S };
+    S.ready = true;
+    setAvatar(S.avatarPref || S.cfgAvatar || 'bot', false);
     if (LITE) document.documentElement.classList.add('no-border');
     else borderMount = new P.ShaderMount($('#border'), P.pulsingBorderFragmentShader, {
       u_colorBack: [0, 0, 0, 0], u_colors: [hsl(38, 1, 0.6), hsl(330, 0.9, 0.6), hsl(200, 0.9, 0.6)], u_colorsCount: 3,
@@ -337,6 +367,7 @@ function frame() {
     orbSpeed: { idle: 0.35, listening: 0.6 + L, thinking: 1.6, speaking: 0.7 + L * 1.4 }[st] ?? 0.5,
   };
   const k = 0.06;
+  if (S.snapPalette) { cur.pal = goal.pal; S.snapPalette = false; }
   cur = {
     pal: lerpCol(cur.pal, goal.pal, 0.03), radius: lerp(cur.radius, goal.radius, 0.25), thick: lerp(cur.thick, goal.thick, 0.2),
     distortion: lerp(cur.distortion, goal.distortion, k), swirl: lerp(cur.swirl, goal.swirl, k), speed: lerp(cur.speed, goal.speed, k), orbSpeed: lerp(cur.orbSpeed, goal.orbSpeed, 0.1),
@@ -347,10 +378,11 @@ function frame() {
     orbMount.setUniforms({ u_radius: cur.radius, u_thickness: cur.thick, u_colors: oc, u_colorsCount: oc.length });
     orbMount.setSpeed(cur.orbSpeed);
   }
-  if (face && S.avatar === 'face') {
-    face.setLevels(S.mic, S.out, S.bands);
-    face.setColors(faceColors(st));
-    face.frame();
+  const av = avatar();
+  if (av) {
+    av.setLevels(S.mic, S.out, S.bands);
+    av.setColors(avatarColors(st));
+    av.frame();
   }
   document.documentElement.style.setProperty('--lvl', String(1 + L * 0.25));
   $('#bg-fallback').style.background = `radial-gradient(120% 90% at 30% 20%, rgba(${cur.pal[1].slice(0, 3).map((v) => v * 255 | 0)}) 0%, rgba(${cur.pal[0].slice(0, 3).map((v) => v * 255 | 0)}) 60%, #05060a 100%)`;
@@ -362,6 +394,7 @@ connect();
 
 // the face follows the pointer a little (it knows you're there)
 addEventListener('pointermove', (e) => {
+  const face = avatar();
   if (!face) return;
   const r = $('#orb-wrap').getBoundingClientRect();
   const x = (e.clientX - (r.left + r.width / 2)) / (innerWidth / 2), y = -(e.clientY - (r.top + r.height / 2)) / (innerHeight / 2);

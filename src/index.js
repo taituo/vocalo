@@ -320,7 +320,7 @@ ui.start();
 ui.set({ title: 'Vocalo', mode });
 caption(transport.isRemote ? `connecting to ${transport.remote.host}…` : 'warming up voice + agent…');
 pub('profile', { name: cfg.profileName });
-pub('config', { avatar: cfg.ui.avatar, aspect: cfg.ui.aspect });
+pub('config', { avatar: cfg.ui.avatar, theme: cfg.ui.theme, aspect: cfg.ui.aspect });
 
 const web = await events.ready;
 if (wantWeb) {

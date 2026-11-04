@@ -20,11 +20,15 @@
   </aside>
 <script type="module">
   import { Face, FACE_PALETTES } from './face.js';
+  import { createBot, BOT_PALETTES } from './bot.js';
   const q = new URLSearchParams(location.search);
-  const f = new Face(document.getElementById('face'), { lite: q.has('lite') });
+  const bot = (q.get('avatar') || 'bot') === 'bot';
+  if (bot) document.body.style.background = 'linear-gradient(160deg, #cfe8ff 0%, #ffe3ef 55%, #fff1d6 100%)';
+  const f = bot ? createBot(document.getElementById('face'), { lite: q.has('lite') }) : new Face(document.getElementById('face'), { lite: q.has('lite') });
+  const PAL = bot ? BOT_PALETTES : FACE_PALETTES;
   window.face = f;
   let st = q.get('state') || 'speaking';
-  const setSt = (x) => { st = x; f.setState(x); f.setColors(FACE_PALETTES[x](222)); };
+  const setSt = (x) => { st = x; f.setState(x); f.setColors(PAL[x](222)); };
   setSt(st);
   document.querySelectorAll('[data-s]').forEach((b) => b.onclick = () => setSt(b.dataset.s));
   document.getElementById('nod').onclick = () => f.nod(1);
