@@ -21,7 +21,13 @@
 
   "speech": { "url": "ws://127.0.0.1:8765", "spawn": true },
   "ui": { "aspect": "16:9", "eventsPort": 8766 },
-  "conversation": { "mode": "vad", "bargeIn": true, "permissions": "ask", "busyPolicy": "steer", "preamble": true, "defaultLang": "fi", "fillerAfterMs": 1400 },
+  "conversation": { "mode": "vad", "bargeIn": true, "permissions": "ask", "busyPolicy": "steer", "verbosity": "short", "narrateEveryMs": 7000, "preamble": true, "defaultLang": "fi", "fillerAfterMs": 1400 },
+  "talker": {
+    "url": "http://127.0.0.1:8080/v1",
+    "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+    "apiKeyEnv": null,
+    "ackDeadlineMs": 900
+  },
   "control": { "autoCompactAt": 85, "speakConfirmations": false },
   "metricsFile": null
 }

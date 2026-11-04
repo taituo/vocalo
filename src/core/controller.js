@@ -9,7 +9,7 @@ import { EventEmitter } from 'node:events';
 const WAKE = /^\s*(?:hey|hei|ok|okei)?[\s,]*(?:vocalo|vokalo|vocaloo|bocalo|wocalo|vokaalo)\b[\s,.:!?-]*/i;
 const STOP_ONLY = /^\s*(?:stop|stop it|wait|hold on|cancel|shut up|quiet|seis|lopeta|odota|hiljaa|peru|keskeytä|stoppi)[\s.!]*$/i;
 
-const FI_CMD = /\b(vaihda|käytä|uusi|aloita|jatka|tiivistä|näytä|listaa|avaa|peru|keskeytä|lopeta|tila|tilaan|ajattele|mieti|salli|kysy|paljonko|mikä|mitä|apua|lisäksi|sessio|istunto|malli)/i;
+const FI_CMD = /\b(kerro|lyhyemmin|lyhyesti|tiiviimmin|tarkemmin|syvemmin|normaalisti|vaihda|käytä|uusi|aloita|jatka|tiivistä|näytä|listaa|avaa|peru|keskeytä|lopeta|tila|tilaan|ajattele|mieti|salli|kysy|paljonko|mikä|mitä|apua|lisäksi|sessio|istunto|malli)/i;
 const IMG = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 
 /** Voice phrase -> command line. EN + FI. Returns null if not a command. */
@@ -34,6 +34,9 @@ export function voiceToCommand(text) {
     [/^(?:allow everything|auto approve|trust all|salli kaikki)$/i, () => 'permissions allow'],
     [/^(?:ask (?:me )?(?:first|before)|kysy (?:ensin|aina))$/i, () => 'permissions ask'],
     [/^(?:steer|also|lisäksi)[:,]? (.+)$/i, (m) => `steer ${m[1]}`],
+    [/^(?:tell me more|more detail|go deeper|explain more|kerro tarkemmin|kerro lisää|syvemmin|tarkemmin)$/i, () => 'verbosity deep'],
+    [/^(?:shorter|be brief|briefer|keep it short|lyhyemmin|lyhyesti|tiiviimmin)$/i, () => 'verbosity short'],
+    [/^(?:normal length|normaalisti|normaali pituus)$/i, () => 'verbosity normal'],
     [/^(?:help|what can you do|apua|mitä osaat)$/i, () => 'help'],
   ];
   for (const [re, fn] of rules) { const m = re.exec(t); if (m) return fn(m); }
@@ -101,6 +104,10 @@ export class Controller extends EventEmitter {
           if (!['ask', 'allow', 'deny'].includes(arg)) return this.emit('info', `permissions: ${this.orch.config.permissions} (ask|allow|deny)`);
           this.orch.config.permissions = arg;
           return this.#say(`Permissions: ${arg}.`, `Luvat: ${({ ask: 'kysy', allow: 'salli', deny: 'estä' })[arg]}.`, ctx);
+        case 'verbosity': case 'v':
+          if (!this.orch.setVerbosity(arg)) return this.emit('info', `verbosity: ${this.orch.config.verbosity} (short|normal|deep)`);
+          return this.#say({ short: 'Okay, short answers.', normal: 'Okay, normal length.', deep: 'Okay, more detail.' }[arg],
+            { short: 'Okei, lyhyesti.', normal: 'Okei, normaalisti.', deep: 'Okei, tarkemmin.' }[arg], ctx);
         case 'busy':
           if (!['steer', 'interrupt', 'queue'].includes(arg)) return this.emit('info', `busy policy: ${this.orch.config.busyPolicy} (steer|interrupt|queue)`);
           this.orch.config.busyPolicy = arg; return this.emit('info', `busy policy: ${arg}`);
@@ -241,6 +248,7 @@ export const HELP = `:model [name]        list or switch model         "Vocalo, 
 :new                 fresh session                "Vocalo, uusi sessio"
 :compact  :context   context management           "Vocalo, tiivistä"
 :steer <text>        add guidance to the running turn without stopping it
+:verbosity short|normal|deep  answer length       "Vocalo, kerro tarkemmin" / "lyhyemmin"
 :busy steer|interrupt|queue   what talking during agent work does
 :permissions ask|allow|deny
 :show <path|url>     show a file/screenshot from the agent's machine ("mac:" prefix = local)

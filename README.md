@@ -32,6 +32,34 @@ Try it without a mic or Kiro: `npm run demo` (mock ACP agent, typed input, timed
 Mic and TTS with the mock agent: `npm run demo:voice`.
 Tests (no Mac or models needed): `npm test` and `npm run test:py`.
 
+## Conversation feel: talker + thinker
+
+Kiro is the **thinker**. It's smart, but it can take a second or more before its first word and minutes when it works.
+A small fast **talker** model keeps the conversation human in the meantime:
+
+| moment | what you hear | who |
+|---|---|---|
+| you stop talking | ~0.3–0.6 s: a *contextual* acknowledgement: "Joo, katsotaan ne testit." | talker |
+| Kiro starts answering | the real answer, streamed sentence by sentence | Kiro |
+| Kiro works silently with tools | every ~7 s, a short progress line: "Ajan nyt testit…" | talker (or a template) |
+| you interrupt | audio stops immediately; Kiro is told exactly what you heard | Vocalo |
+
+The talker is **never on the critical path**. It has a 900 ms deadline, and if it's late or produces something that answers or asks,
+the output is dropped and the pre-rendered filler plays instead. Any OpenAI-compatible endpoint works:
+```bash
+pip install mlx-lm && mlx_lm.server --model mlx-community/Qwen3-4B-Instruct-2507-4bit --port 8080   # fully local
+```
+then set `"talker": {"url": "http://127.0.0.1:8080/v1", "model": "…"}`. `--doctor` measures its ack latency and shows samples.
+Small local models vary a lot in Finnish quality, so listen to the `--doctor` samples. A fast cloud model is also fine for this role.
+
+**Persona** (`src/core/voice-preamble.js` + `steering/vocalo.md`): reacts to what you said, mirrors your language,
+register and energy, keeps turns short, and hands the floor back with a natural question when it helps. It reads speech-recognition
+mistakes charitably and confirms best guesses briefly. It is warm but **not sycophantic**: no "great question", and it tells you
+kindly when you're wrong. Answer length is adjustable: `:verbosity short|normal|deep` or "Vocalo, kerro tarkemmin" / "lyhyemmin".
+
+**Interrupts are honest.** ACP can't edit the agent's history, so after a barge-in the next prompt carries
+`[Vocalo note: … They heard only: "…"]`. Kiro then continues from what you actually heard, instead of assuming you heard everything.
+
 ## Remote mode: talk on the Mac, Kiro works on the server
 
 ```
@@ -78,6 +106,7 @@ Commands run locally and instantly, with no LLM round-trip. Anything unknown sta
 | `:show <path>` / `:sh <cmd>` | "show file src/app.js" | view a file or screenshot, or run a quick command, *on the agent's machine* |
 | `:diff` / `:plan` | "show the diff" · "näytä suunnitelma" | last code change (colored) / live plan panel |
 | `:permissions ask\|allow\|deny` | "salli kaikki" · "kysy ensin" | tool-approval policy; "yes, always" stores Kiro consent |
+| `:verbosity short\|normal\|deep` | "kerro tarkemmin" · "lyhyemmin" · "tell me more" | answer length |
 | `:busy steer\|interrupt\|queue` | | what talking during agent work does |
 | `:usage` `:mcp` `:agent` `:options` | | Kiro account usage, MCP status, connection and extensions, all options |
 
@@ -177,6 +206,8 @@ A future native UI can subscribe to the same show: `GET http://127.0.0.1:8766/ev
 src/acp/client.js        ACP client, Kiro V3 aware: config options, modes, sessions, steer, ext gating, consent
 src/acp/transport.js     local or SSH (ControlMaster) transport, remote file reads, --doctor
 src/core/controller.js   command layer: palette, "Vocalo, …" voice commands (EN/FI), HTTP
+src/core/talker.js       fast talker model (acks, narration) over any OpenAI-compatible API
+src/core/voice-preamble.js  voice persona + per-turn notes (interrupted / verbosity)
 src/core/orchestrator.js turn-taking, barge-in, permissions by voice, metrics
 src/core/chunker.js      token stream → speakable chunks (early first clause, code stripped)
 src/core/scene.js        [[stage tag]] parser (split-safe)

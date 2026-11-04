@@ -4,15 +4,17 @@ import { EventEmitter } from 'node:events';
 import { SpeechChunker } from './chunker.js';
 import { SceneParser } from './scene.js';
 import { guessLang } from './lang.js';
-import { VOICE_PREAMBLE } from './voice-preamble.js';
+import { voicePreamble, turnNotes } from './voice-preamble.js';
+import { templateNarration } from './talker.js';
 
 export const State = Object.freeze({ IDLE: 'idle', LISTENING: 'listening', THINKING: 'thinking', SPEAKING: 'speaking' });
 
 export class Orchestrator extends EventEmitter {
-  constructor({ acp, speech, config = {} }) {
+  constructor({ acp, speech, talker = null, config = {} }) {
     super();
     this.acp = acp;
     this.speech = speech;
+    this.talker = talker;
     this.config = {
       bargeIn: true, permissions: 'ask', preamble: true, defaultLang: 'en', fillerAfterMs: 1400,
       // What to do when the user talks while the agent is busy doing agentic work (tools running):
@@ -20,8 +22,13 @@ export class Orchestrator extends EventEmitter {
       //   interrupt -> cancel and start a new turn
       //   queue     -> hold it and send when the turn finishes
       busyPolicy: 'steer',
+      verbosity: 'short',        // short | normal | deep
+      narrateEveryMs: 7000,      // speak a progress line when tools run silently this long (0 = off)
+      maxNarrations: 4,
       ...config,
     };
+    this.lastInterrupted = null;  // what the user actually heard of an interrupted answer
+    this.pendingVerbosity = null;
     this.intercept = null;     // (text, ctx) => boolean|Promise<boolean>: local commands handled before the agent
     this.queued = [];
     this.sysSeq = 0;
@@ -70,6 +77,7 @@ export class Orchestrator extends EventEmitter {
   // so a cough doesn't kill a 5-minute refactor.
   #onBargeIn() {
     const turn = this.turn;
+    if (turn && this.sayIds.size) turn.cutOff = true;
     this.speech.stop();
     this.sayIds.clear();
     if (!turn) return;
@@ -143,9 +151,19 @@ export class Orchestrator extends EventEmitter {
     this.turn = turn;
     this.#setState(State.THINKING);
     turn.fillerTimer = setTimeout(() => this.#filler(turn, 'hmm'), this.config.fillerAfterMs);
+    if (this.config.narrateEveryMs) turn.narrateTimer = setInterval(() => this.#narrate(turn), Math.min(1000, this.config.narrateEveryMs));
 
-    let promptText = text;
-    if (!this.preambleSent) { promptText = VOICE_PREAMBLE + text; this.preambleSent = true; }
+    let promptText = turnNotes({ interrupted: this.lastInterrupted, verbosityChanged: this.pendingVerbosity }) + text;
+    this.lastInterrupted = null;
+    this.pendingVerbosity = null;
+    if (!this.preambleSent) {
+      promptText = voicePreamble({ talker: !!this.talker?.enabled, verbosity: this.config.verbosity }) + promptText;
+      this.preambleSent = true;
+    }
+    turn.heard = [];
+    turn.lastSpokenAt = Date.now();
+    turn.narrations = 0;
+    this.#startTalker(turn, text);
 
     turn.done = this.acp.prompt(promptText)
       .then((res) => this.#onTurnEnd(turn, res?.stopReason ?? 'end_turn'))
@@ -180,6 +198,8 @@ export class Orchestrator extends EventEmitter {
       // fallthrough
       case 'tool_call_update': {
         turn.activeTools ??= new Set();
+        turn.toolTitles ??= new Map();
+        if (u.title) turn.toolTitles.set(u.toolCallId, u.title);
         if (u.status === 'completed' || u.status === 'failed') turn.activeTools.delete(u.toolCallId);
         else if (u.sessionUpdate === 'tool_call' || u.status === 'in_progress' || u.status === 'pending') turn.activeTools.add(u.toolCallId);
         this.emit('tool', { id: u.toolCallId, title: u.title, kind: u.kind, status: u.status, locations: u.locations });
@@ -195,6 +215,47 @@ export class Orchestrator extends EventEmitter {
       default:
         break; // ignore unknown types per ACP/Kiro guidance
     }
+  }
+
+  /** Talker: contextual instant acknowledgement, raced against the thinker's first words. */
+  #startTalker(turn, userText) {
+    if (!this.talker?.enabled) return;
+    turn.talkerAbort = new AbortController();
+    this.talker.ack(userText, { signal: turn.talkerAbort.signal }).then((ack) => {
+      if (!ack || turn.cancelled || turn.ended || turn.fillerSent || turn.metrics.firstSayAt || turn.silenced) return;
+      turn.fillerSent = true; // the ack replaces the canned filler
+      clearTimeout(turn.fillerTimer);
+      const id = `${turn.id}.a`;
+      this.sayIds.add(id);
+      this.speech.say(id, ack, this.lastLang);
+      this.emit('ack', ack);
+    });
+  }
+
+  /** While tools run silently, keep the listener in the loop with a short spoken progress line. */
+  async #narrate(turn) {
+    if (turn.cancelled || turn.ended || turn.silenced || this.pendingPermission) return;
+    if (!turn.activeTools?.size || turn.narrations >= this.config.maxNarrations || turn.narrating) return;
+    if (this.sayIds.size || Date.now() - turn.lastSpokenAt < this.config.narrateEveryMs) return;
+    turn.narrating = true;
+    try {
+      const ctx = { lang: this.lastLang, tools: [...(turn.toolTitles ?? new Map()).values()], plan: this.acp.kiro?.plan ?? [] };
+      const line = (this.talker?.enabled ? await this.talker.narrate(ctx) : null) ?? templateNarration(ctx);
+      if (!line || turn.cancelled || turn.ended || this.sayIds.size) return;
+      turn.narrations++;
+      const id = `${turn.id}.n${turn.narrations}`;
+      this.sayIds.add(id);
+      this.speech.say(id, line, this.lastLang);
+      turn.lastSpokenAt = Date.now();
+      this.emit('narration', line);
+    } finally { turn.narrating = false; }
+  }
+
+  setVerbosity(v) {
+    if (!['short', 'normal', 'deep'].includes(v)) return false;
+    this.config.verbosity = v;
+    this.pendingVerbosity = v; // told to the agent on the next prompt
+    return true;
   }
 
   /** Pre-rendered "hmm, one moment" when the agent is slow: zero TTS latency, once per turn. */
@@ -227,8 +288,14 @@ export class Orchestrator extends EventEmitter {
     if (id?.startsWith('sys.')) { this.emit('assistant_subtitle', { text, durationMs }); return; }
     const turn = this.turn;
     if (!turn || !id?.startsWith(`${turn.id}.`)) return;
-    if (id.endsWith('.f')) { turn.metrics.fillerAt ??= Date.now(); }
-    else if (!turn.metrics.firstAudioAt) {
+    turn.lastSpokenAt = Date.now();
+    const sub = id.slice(String(turn.id).length + 1);
+    if (sub === 'f' || sub === 'a') { turn.metrics.fillerAt ??= Date.now(); }
+    else if (sub.startsWith('n')) { /* progress narration */ }
+    else {
+      turn.heard.push(text);
+    }
+    if (/^\d+$/.test(sub) && !turn.metrics.firstAudioAt) {
       turn.metrics.firstAudioAt = Date.now();
       this.emit('metrics', this.#metrics(turn));
     }
@@ -238,6 +305,8 @@ export class Orchestrator extends EventEmitter {
 
   #onTurnEnd(turn, stopReason) {
     clearTimeout(turn.fillerTimer);
+    clearInterval(turn.narrateTimer);
+    turn.talkerAbort?.abort();
     if (turn.cancelled) { turn.ended = true; return; } // interrupt() owns state from here
     if (this.turn !== turn) return;
     turn.scene.flush();
@@ -270,11 +339,16 @@ export class Orchestrator extends EventEmitter {
   /** Stop talking and cancel the agent turn. Resolves once the old prompt settled. */
   async interrupt(reason = 'user') {
     const turn = this.turn;
+    if (turn && this.sayIds.size) turn.cutOff = true;
     this.speech.stop();
     this.sayIds.clear();
     if (!turn) return;
     turn.cancelled = true;
     clearTimeout(turn.fillerTimer);
+    clearInterval(turn.narrateTimer);
+    turn.talkerAbort?.abort();
+    // ACP can't rewrite history, so the next prompt tells the agent what was actually heard.
+    if (turn.metrics.firstAudioAt && (turn.cutOff || !turn.ended)) this.lastInterrupted = { heard: turn.heard.join(' ') };
     this.cancelPermission(); // Kiro: cancel pending permissions before session/cancel
     this.queued = [];
     this.emit('interrupted', reason);

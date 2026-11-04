@@ -1,6 +1,6 @@
 {
   "name": "vocalo",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Voice-first, TV-style conversational shell for ACP agents (Kiro CLI V3 by default).",
   "type": "module",
   "bin": {

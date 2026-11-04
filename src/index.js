@@ -11,6 +11,7 @@ import { Transport, parseRemoteSpec } from './acp/transport.js';
 import { SpeechSidecar, SilentSpeech } from './speech/sidecar.js';
 import { Orchestrator } from './core/orchestrator.js';
 import { Controller } from './core/controller.js';
+import { Talker } from './core/talker.js';
 import { TvUI } from './ui/tui.js';
 import { startEventServer } from './ui/events.js';
 
@@ -47,10 +48,14 @@ const defaults = {
   ui: { aspect: '16:9', eventsPort: 8766 },
   conversation: { mode: 'vad', bargeIn: true, permissions: 'ask', preamble: true, defaultLang: 'en', busyPolicy: 'steer' },
   control: { autoCompactAt: 85, speakConfirmations: false },
+  // Fast "talker" model (OpenAI-compatible). Empty = canned fillers only.
+  // Local: `mlx_lm.server --model <mlx-model> --port 8080` -> url http://127.0.0.1:8080/v1
+  talker: { url: null, model: null, apiKey: null, ackDeadlineMs: 900 },
 };
 const fileCfg = existsSync(argv.config) ? JSON.parse(readFileSync(argv.config, 'utf8')) : {};
 const merge = (k) => ({ ...defaults[k], ...fileCfg[k] });
-const cfg = { ...defaults, ...fileCfg, agent: merge('agent'), speech: merge('speech'), ui: merge('ui'), conversation: merge('conversation'), control: merge('control') };
+const cfg = { ...defaults, ...fileCfg, agent: merge('agent'), speech: merge('speech'), ui: merge('ui'), conversation: merge('conversation'), control: merge('control'), talker: merge('talker') };
+if (cfg.talker.apiKeyEnv) cfg.talker.apiKey = process.env[cfg.talker.apiKeyEnv];
 if (argv.agent) { const [c, ...a] = argv.agent.split(' ').filter(Boolean); cfg.agent.command = c; cfg.agent.args = a; }
 if (argv.remote) { const r = parseRemoteSpec(argv.remote); cfg.remote = { ...(cfg.remote ?? {}), host: r.host }; if (r.cwd) cfg.cwd = r.cwd; }
 if (cfg.remote?.cwd && !argv.remote && !argv.cwd) cfg.cwd = cfg.remote.cwd;
@@ -87,6 +92,15 @@ if (argv.doctor) {
     for (const o of acp.configOptions) console.log(`  ${(o.configId ?? o.id).padEnd(12)} = ${o.currentValue}   [${(o.options ?? []).map((v) => v.value).join(', ')}]`);
   } catch (e) { console.log(`✘ ACP handshake failed: ${e.message}`); }
   acp.stop();
+  const tk = new Talker({ ...cfg.talker, ackDeadlineMs: 5000 });
+  if (tk.enabled) {
+    for (const phrase of ['voitko katsoa miksi testit failaa', 'explain how the auth middleware works']) {
+      const t = Date.now();
+      const a = await tk.ack(phrase);
+      console.log(`${a ? '✔' : '✘'} ${'talker ack'.padEnd(30)} ${String(Date.now() - t).padStart(5)} ms  ${a ?? '(no usable ack)'}  ← "${phrase}"`);
+    }
+    console.log('  target: < 500 ms. Above ~900 ms the talker is skipped and canned fillers play instead.');
+  } else console.log('· talker not configured (canned fillers only). See "talker" in vocalo.config.example.json');
   process.exit(0);
 }
 
@@ -121,7 +135,8 @@ const speech = argv['no-speech']
 speech.on('log', (m) => log('speech:', m.message));
 speech.on('error', (m) => { log('speech error:', m.message); ui.set({ notice: m.message }); });
 
-const orch = new Orchestrator({ acp, speech, config: cfg.conversation });
+const talker = new Talker(cfg.talker);
+const orch = new Orchestrator({ acp, speech, talker, config: cfg.conversation });
 const ctl = new Controller({ acp, orch, transport, ui, config: cfg.control });
 
 // ---- orchestrator/controller -> UI + event stream
@@ -137,6 +152,8 @@ orch.on('code', (code) => { ui.set({ code, image: null, diff: null }); pub('code
 orch.on('plan', (entries) => { ui.plan(entries); pub('plan', { entries }); });
 orch.on('diff', (d) => { ui.showDiff(d); pub('diff', d); });
 orch.on('steered', (text) => { ui.set({ notice: `↪ steered: ${text}` }); pub('steered', { text }); });
+orch.on('ack', (text) => pub('ack', { text }));
+orch.on('narration', (text) => pub('narration', { text }));
 orch.on('queued', (text) => { ui.set({ notice: `⏳ queued: ${text}` }); pub('queued', { text }); });
 const toolTitles = new Map();
 orch.on('tool', (t) => {
