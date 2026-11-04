@@ -81,8 +81,13 @@ export class SilentSpeech extends EventEmitter {
       let t = 0;
       this.levelTimer = setInterval(() => {
         t += 1;
-        const out = this.playing ? Math.max(0, 0.35 + 0.3 * Math.sin(t / 2.3) + 0.25 * Math.sin(t / 0.9) * Math.random()) : 0;
-        if (out || this.lastOut) this.emit('level', { mic: 0, out: Math.round(out * 1000) / 1000 });
+        // syllable-like envelope (~4.5 Hz) with random stress, plus vowel colour changes
+        const syl = Math.pow(Math.abs(Math.sin(t * 0.033 * Math.PI * 4.5)), 1.5);
+        const out = this.playing ? Math.min(1, syl * (0.55 + 0.45 * Math.random()) + 0.08) : 0;
+        if (t % 9 === 0) this.vowel = Math.random();
+        const v = this.vowel ?? 0.5, r3 = (x) => Math.round(x * 1000) / 1000;
+        const bands = this.playing ? [r3(out * 0.7), r3(out * (0.4 + 0.5 * (1 - v))), r3(out * 0.6 * v)] : [0, 0, 0];
+        if (out || this.lastOut) this.emit('level', { mic: 0, out: r3(out), bands });
         this.lastOut = out;
       }, 33);
       this.levelTimer.unref?.();

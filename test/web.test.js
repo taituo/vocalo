@@ -74,3 +74,12 @@ test('web server: stage, shaders, SSE + /state snapshot, commands', async () => 
   assert.equal(r.status, 204);
   assert.deepEqual(got, [{ type: 'ptt', active: true }]);
 });
+
+test('face springs stay stable at any frame rate (no exploding mouth)', async () => {
+  const { Spring } = await import('../web/face.js');
+  for (const dt of [1 / 120, 1 / 60, 1 / 15, 0.05, 0.2]) {
+    const s = new Spring(0, 28);
+    for (let i = 0; i < 400; i++) { s.target = i % 7 < 3 ? 1 : 0; s.step(dt); if (i % 50 === 0) s.kick(-5); }
+    assert.ok(Number.isFinite(s.v) && Math.abs(s.v) < 3, `dt=${dt} -> ${s.v}`);
+  }
+});

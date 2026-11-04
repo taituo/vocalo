@@ -47,7 +47,10 @@ body { display: grid; grid-template-rows: 1fr auto; }
 /* ---------- center: orb + headline ---------- */
 #center { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; pointer-events: none; }
 #orb-wrap { position: absolute; width: 46cqh; aspect-ratio: 1; left: 50%; top: 44%; translate: -50% -50%; transition: all .8s var(--ease); }
-#orb, #orb-fallback { position: absolute; inset: 0; }
+#orb, #face, #orb-fallback { position: absolute; inset: 0; }
+html[data-avatar="face"] #orb, html:not([data-avatar="face"]) #face { display: none; }
+html[data-avatar="face"] #orb-wrap { width: 58cqh; top: 42%; }
+html[data-avatar="face"] #stage.has-panel #orb-wrap { width: 24cqh; left: 91%; top: 79%; }
 #orb { -webkit-mask-image: radial-gradient(circle at center, #000 52%, transparent 70%); mask-image: radial-gradient(circle at center, #000 52%, transparent 70%); }
 #orb-fallback { display: none; border-radius: 50%; background: radial-gradient(circle, rgba(255,255,255,.9) 0 8%, rgba(143,211,255,.55) 22%, rgba(197,139,255,.25) 45%, transparent 66%); filter: blur(2px); transform: scale(var(--lvl, 1)); transition: transform .08s linear; }
 .no-webgl #orb-fallback { display: block; }

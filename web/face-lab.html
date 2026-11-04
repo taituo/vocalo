@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Vocalo face lab</title><link rel="icon" href="data:,">
+<style>
+  body { margin: 0; background: radial-gradient(120% 90% at 30% 20%, #23305a, #0b0f1d 55%, #05060a); color: #ccd; font: 13px ui-sans-serif, system-ui; height: 100vh; display: grid; grid-template-columns: 1fr 240px; }
+  #face { position: relative; }
+  aside { padding: 16px; display: grid; gap: 8px; align-content: start; background: rgba(0,0,0,.35); }
+  button { background: #1d2340; color: #dde; border: 1px solid #334; border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+  label { display: grid; gap: 4px; }
+</style></head>
+<body>
+  <div id="face"></div>
+  <aside>
+    <b>State</b>
+    <div><button data-s="idle">idle</button> <button data-s="listening">listening</button> <button data-s="thinking">thinking</button> <button data-s="speaking">speaking</button></div>
+    <b>Events</b>
+    <div><button id="nod">nod</button> <button id="delight">delight</button> <button id="look">look at panel</button></div>
+    <label>fake voice <input id="voice" type="checkbox" checked></label>
+    <label>fake mic <input id="mic" type="checkbox"></label>
+    <p style="opacity:.6">URL: ?state=speaking&amp;voice=1&amp;mic=0&amp;freeze=1200 (freeze at ms for screenshots)</p>
+  </aside>
+<script type="module">
+  import { Face, FACE_PALETTES } from './face.js';
+  const q = new URLSearchParams(location.search);
+  const f = new Face(document.getElementById('face'), { lite: q.has('lite') });
+  window.face = f;
+  let st = q.get('state') || 'speaking';
+  const setSt = (x) => { st = x; f.setState(x); f.setColors(FACE_PALETTES[x](222)); };
+  setSt(st);
+  document.querySelectorAll('[data-s]').forEach((b) => b.onclick = () => setSt(b.dataset.s));
+  document.getElementById('nod').onclick = () => f.nod(1);
+  document.getElementById('delight').onclick = () => f.delight();
+  document.getElementById('look').onclick = () => f.lookAt(-0.85, 0.75, 2500);
+  const voice = document.getElementById('voice'), mic = document.getElementById('mic');
+  if (q.has('voice')) voice.checked = q.get('voice') === '1';
+  if (q.has('mic')) mic.checked = q.get('mic') === '1';
+  let t = 0, vowel = 0.5;
+  const freeze = q.has('freeze') ? Number(q.get('freeze')) : null, t0 = performance.now();
+  function loop(now) {
+    t += 1; if (t % 9 === 0) vowel = Math.random();
+    const syl = Math.pow(Math.abs(Math.sin(now / 1000 * Math.PI * 4.5)), 1.5);
+    const out = voice.checked ? Math.min(1, syl * (0.6 + 0.4 * Math.random()) + 0.05) : 0;
+    const m = mic.checked ? Math.max(0, 0.3 + 0.3 * Math.sin(now / 300)) : 0;
+    f.setLevels(m, out, [out * 0.7, out * (0.4 + 0.5 * (1 - vowel)), out * 0.6 * vowel]);
+    f.frame(now);
+    if (freeze === null || now - t0 < freeze) requestAnimationFrame(loop);
+    else document.title = 'frozen';
+  }
+  requestAnimationFrame(loop);
+</script>
+</body></html>

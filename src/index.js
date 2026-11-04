@@ -139,7 +139,7 @@ const speech = argv['no-speech']
     });
 speech.on('log', (m) => log('speech:', m.message));
 speech.on('error', (m) => notify(m.message));
-speech.on('level', (m) => pub('level', { mic: m.mic, out: m.out }));
+speech.on('level', (m) => pub('level', { mic: m.mic, out: m.out, bands: m.bands }));
 
 const talker = new Talker(cfg.talker);
 const orch = new Orchestrator({ acp, speech, talker, config: cfg.conversation });
@@ -173,7 +173,7 @@ orch.on('metrics', (m) => {
 });
 orch.on('permission', ({ title, resource }) => { ui.set({ permission: resource ? `${title} (${resource})` : title }); pub('permission', { title, resource }); });
 orch.on('permission_resolved', () => { ui.set({ permission: null }); pub('permission', null); pub('permission_resolved', {}); });
-orch.on('turn_end', ({ stopReason, text }) => log('assistant:', JSON.stringify(text), stopReason));
+orch.on('turn_end', ({ stopReason, text }) => { log('assistant:', JSON.stringify(text), stopReason); pub('turn_end', { stopReason, tools: toolTitles.size > 0 }); toolTitles.clear(); });
 orch.on('warn', (w) => notify(w));
 
 ctl.on('overlay', ({ title, lines, picks }) => { ui.overlay(title, lines); pub('overlay', { title, lines, picks }); });
@@ -320,6 +320,7 @@ ui.start();
 ui.set({ title: 'Vocalo', mode });
 caption(transport.isRemote ? `connecting to ${transport.remote.host}…` : 'warming up voice + agent…');
 pub('profile', { name: cfg.profileName });
+pub('config', { avatar: cfg.ui.avatar, aspect: cfg.ui.aspect });
 
 const web = await events.ready;
 if (wantWeb) {

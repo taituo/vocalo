@@ -3,12 +3,15 @@
 //   background  MeshGradient   palette from the scene colour, tinted by state
 //   orb         SmokeRing      breathes with the mic (listening) / the voice (speaking)
 //   border      PulsingBorder  "attention": recording (push-to-talk) or waiting for permission
+import { Face, FACE_PALETTES } from './face.js';
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
 const S = {
   state: 'idle', mic: 0, out: 0, lvl: 0, aspect: localStorage.getItem('vocalo.aspect') || '16:9',
-  base: '#1b2a4a', plan: [], panel: null, permission: null, ptt: false, pttDown: false, stats: false,
+  base: '#1b2a4a', plan: [], panel: null, permission: null, ptt: false, pttDown: false, stats: false, bands: [0, 0, 0],
+  avatar: new URLSearchParams(location.search).get('avatar') || localStorage.getItem('vocalo.avatar') || null,
 };
+let face = null;
 
 // ------------------------------------------------------------------ comms
 const send = (cmd) => fetch('/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(cmd) }).catch(() => {});
@@ -27,11 +30,12 @@ function connect() {
 // ------------------------------------------------------------------ events
 function handle(ev, replay = false) {
   switch (ev.type) {
-    case 'level': S.mic = ev.mic ?? 0; S.out = ev.out ?? 0; break;
+    case 'level': S.mic = ev.mic ?? 0; S.out = ev.out ?? 0; if (ev.bands) S.bands = ev.bands; break;
+    case 'turn_end': if (!replay && ev.stopReason === 'end_turn' && ev.tools) face?.delight(); break;
     case 'state': setState(ev.state); break;
     case 'subtitle': if (!replay) subtitle(ev.text, ev.durationMs); else $('#sub-assistant').textContent = ev.text; break;
     case 'user_partial': userLine(ev.text, true); break;
-    case 'user': userLine(ev.text, false); break;
+    case 'user': userLine(ev.text, false); if (!replay) face?.nod(1); break;
     case 'scene': scene(ev); break;
     case 'code': showPanel({ kind: 'code', title: firstLineTitle(ev.code), body: ev.code }); break;
     case 'diff': showPanel({ kind: 'diff', title: ev.path, rows: ev.rows }); break;
@@ -46,13 +50,15 @@ function handle(ev, replay = false) {
     case 'notice': toast(ev.text); break;
     case 'ptt': S.ptt = !!ev.active; attention(); break;
     case 'steered': toast(`↪ ${ev.text}`); break;
-    case 'profile': if (ev.name) toast(`profile: ${ev.name}`); break;
+    case 'profile': if (ev.name && !replay) toast(`profile: ${ev.name}`); break;
+    case 'config': if (!S.avatarChosen && ev.avatar) setAvatar(ev.avatar, false); break;
     case 'connection': $('#caption').textContent = ev.caption ?? $('#caption').textContent; break;
   }
 }
 
 function setState(st) {
   S.state = st;
+  face?.setState(st);
   stage.dataset.state = st;
   $('#live').hidden = st !== 'speaking';
   $('#chip-state').textContent = { idle: 'ready', listening: '● listening', thinking: '◌ thinking', speaking: '◉ speaking' }[st] ?? st;
@@ -121,6 +127,7 @@ function showPanel(p) {
   }
   $('#panel').hidden = false;
   stage.classList.add('has-panel');
+  face?.lookAt(-0.85, 0.75, 2600); // glance at what's being shown
 }
 function hidePanel() { S.panel = null; $('#panel').hidden = true; stage.classList.remove('has-panel'); }
 $('#panel-close').onclick = hidePanel;
@@ -129,18 +136,17 @@ const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>':
 function firstLineTitle(code) { const l = code.split('\n')[0]; return /^[\w./~-]+\.\w+$|^\$ /.test(l) ? l : 'on screen'; }
 function stripTitleLine(code) { const [a, b, ...rest] = code.split('\n'); return /^─+$/.test(b ?? '') ? rest.join('\n') : code; }
 function highlight(src) {
-  // tiny, language-agnostic highlighter: comments, strings, numbers, keywords
-  const KW = /\b(const|let|var|function|return|if|else|for|while|import|from|export|class|def|async|await|new|try|catch|true|false|null|None|self|this|fn|pub|use|struct|impl)\b/g;
-  return src.split('\n').map((line) => {
-    let out = esc(line);
-    const cm = out.match(/(\/\/|#(?!!)).*$/);
-    let tail = '';
-    if (cm) { tail = `<span class="tok-c">${cm[0]}</span>`; out = out.slice(0, cm.index); }
-    out = out.replace(/(&quot;|"|'|`)(?:\\.|(?!\1).)*\1/g, (m) => `<span class="tok-s">${m}</span>`)
-      .replace(/\b\d+(\.\d+)?\b/g, '<span class="tok-n">$&</span>')
-      .replace(KW, '<span class="tok-k">$1</span>');
-    return out + tail;
-  }).join('\n');
+  // tiny language-agnostic highlighter, single pass over the RAW text (escape each token once)
+  const RE = /(\/\/.*$|#(?!!).*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b\d+(?:\.\d+)?\b)|\b(const|let|var|function|return|if|else|for|while|import|from|export|class|def|async|await|new|try|catch|true|false|null|None|self|this|fn|pub|use|struct|impl|of|in)\b/gm;
+  const cls = ['tok-c', 'tok-s', 'tok-n', 'tok-k'];
+  let out = '', last = 0;
+  for (const m of src.matchAll(RE)) {
+    out += esc(src.slice(last, m.index));
+    const g = [1, 2, 3, 4].find((i) => m[i] !== undefined);
+    out += `<span class="${cls[g - 1]}">${esc(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(src.slice(last));
 }
 
 // ------------------------------------------------------------------ plan / tools / agent
@@ -203,6 +209,12 @@ function toast(text) {
 function attention() { stage.dataset.attn = S.ptt || S.pttDown || S.permission || !$('#openurl').hidden ? '1' : '0'; }
 
 // ------------------------------------------------------------------ keyboard
+function setAvatar(a, remember = true) {
+  if (!face && a === 'face') a = 'orb';
+  S.avatar = a; document.documentElement.dataset.avatar = a;
+  if (remember) { S.avatarChosen = true; try { localStorage.setItem('vocalo.avatar', a); } catch {} }
+  orbMount?.setSpeed(a === 'orb' ? 0.5 : 0);
+}
 function setAspect(a) { S.aspect = a; stage.dataset.aspect = a; try { localStorage.setItem('vocalo.aspect', a); } catch {} }
 setAspect(S.aspect);
 function openInput(id) { $('#palette').hidden = id !== '#palette'; $('#typebox').hidden = id !== '#typebox'; const i = $(`${id} input`); i.value = ''; i.focus(); }
@@ -228,6 +240,7 @@ addEventListener('keydown', (e) => {
     case 'p': $('#plan').hidden = !$('#plan').hidden || !S.plan.length; return;
     case 'o': if (!$('#openurl').hidden) $('#openurl-btn').click(); return;
     case '?': return command('help');
+    case 'v': return setAvatar(S.avatar === 'face' ? 'orb' : 'face');
   }
 });
 addEventListener('keyup', (e) => { if (e.code === 'Space' && S.pttDown) { S.pttDown = false; attention(); send({ type: 'ptt', active: false }); } });
@@ -263,6 +276,13 @@ function paletteFor(base, state) {
   return [hsl(h, s, l * 0.45), hsl(h + 35, s, l * 1.15), hsl(h - 28, s * 0.9, l * 0.85), hsl(h + 180, s * 0.5, l * 0.6)];
 }
 
+// face palette per state: [deep, body, rim, eyes], eased in frame()
+let faceCur = null;
+function faceColors(st) {
+  const goal = (FACE_PALETTES[st] ?? FACE_PALETTES.idle)(rgbToHsl(hexToRgb(S.base))[0]);
+  faceCur = faceCur ? faceCur.map((c, i) => c.map((v, j) => lerp(v, goal[i][j], 0.05))) : goal;
+  return faceCur;
+}
 let bgMount, orbMount, borderMount, sizing;
 // ?lite renders at lower resolution (software GL, old GPUs, battery saver)
 const LITE = new URLSearchParams(location.search).has('lite');
@@ -282,6 +302,9 @@ async function initShaders() {
       u_colorBack: [0, 0, 0, 0], u_colors: ORB.idle(200), u_colorsCount: 2, u_noiseScale: 3, u_noiseIterations: 8,
       u_thickness: 0.6, u_radius: 0.25, u_innerShape: 0.7, u_noiseTexture: noise, ...sz({ fit: 'contain', scale: 0.62 }),
     }, { premultipliedAlpha: true, alpha: true }, 0.5, 0, PX[0], PX[1]);
+    try { face = new Face($('#face'), { lite: LITE }); face.setState(S.state); window.__vocalo = { face, S }; } catch (e) { console.warn('face unavailable', e); S.avatar = 'orb'; }
+    S.avatarChosen = !!S.avatar;
+    setAvatar(S.avatar || 'face', false);
     if (LITE) document.documentElement.classList.add('no-border');
     else borderMount = new P.ShaderMount($('#border'), P.pulsingBorderFragmentShader, {
       u_colorBack: [0, 0, 0, 0], u_colors: [hsl(38, 1, 0.6), hsl(330, 0.9, 0.6), hsl(200, 0.9, 0.6)], u_colorsCount: 3,
@@ -324,6 +347,11 @@ function frame() {
     orbMount.setUniforms({ u_radius: cur.radius, u_thickness: cur.thick, u_colors: oc, u_colorsCount: oc.length });
     orbMount.setSpeed(cur.orbSpeed);
   }
+  if (face && S.avatar === 'face') {
+    face.setLevels(S.mic, S.out, S.bands);
+    face.setColors(faceColors(st));
+    face.frame();
+  }
   document.documentElement.style.setProperty('--lvl', String(1 + L * 0.25));
   $('#bg-fallback').style.background = `radial-gradient(120% 90% at 30% 20%, rgba(${cur.pal[1].slice(0, 3).map((v) => v * 255 | 0)}) 0%, rgba(${cur.pal[0].slice(0, 3).map((v) => v * 255 | 0)}) 60%, #05060a 100%)`;
   requestAnimationFrame(frame);
@@ -331,3 +359,11 @@ function frame() {
 
 initShaders().then(() => requestAnimationFrame(frame));
 connect();
+
+// the face follows the pointer a little (it knows you're there)
+addEventListener('pointermove', (e) => {
+  if (!face) return;
+  const r = $('#orb-wrap').getBoundingClientRect();
+  const x = (e.clientX - (r.left + r.width / 2)) / (innerWidth / 2), y = -(e.clientY - (r.top + r.height / 2)) / (innerHeight / 2);
+  face.lookAt(Math.max(-1, Math.min(1, x)) * 0.8, Math.max(-1, Math.min(1, y)) * 0.8, 1200);
+});

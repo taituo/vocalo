@@ -51,6 +51,8 @@ class Player:
         self.was_active = False
         self.fade = None
         self.level = 0.0  # RMS of what is being played (for UI visuals)
+        self.bands = (0.0, 0.0, 0.0)  # low / mid / high energy of the voice -> the face's mouth shape
+        self._win = None
         self.stream = sd.OutputStream(samplerate=OUT_SR, channels=1, dtype="float32",
                                       blocksize=480, latency="low", callback=self._cb)
         self.stream.start()
@@ -120,6 +122,16 @@ class Player:
                 self.cur_buf = self.cur_buf[n:]
                 filled += n
             self.level = float(np.sqrt(np.mean(out[:, 0] ** 2))) if frames else 0.0
+            if self.level > 1e-4 and frames >= 256:
+                if self._win is None or len(self._win) != frames:
+                    self._win = np.hanning(frames).astype(np.float32)
+                spec = np.abs(np.fft.rfft(out[:, 0] * self._win))
+                hz = OUT_SR / frames  # bin width
+                band = lambda a, b: float(np.sqrt(np.mean(spec[int(a / hz):max(int(a / hz) + 1, int(b / hz))] ** 2)))
+                # voiced energy (jaw), formant region (opening), sibilance/"ee" brightness (width)
+                self.bands = (band(90, 500), band(500, 2000), band(2000, 6000))
+            else:
+                self.bands = (0.0, 0.0, 0.0)
             active = self.cur is not None or bool(self.items)
             if self.was_active and not active:
                 events.append(("idle", {}))
@@ -254,6 +266,8 @@ class Sidecar:
         while True:
             await asyncio.sleep(1 / hz)
             cur = (round(min(1.0, self.mic_level * 6), 3), round(min(1.0, getattr(self.player, "level", 0.0) * 4), 3))
+            b = getattr(self.player, "bands", (0.0, 0.0, 0.0))
+            bands = [round(min(1.0, x * 0.25), 3) for x in b]
             if max(cur) < 0.01:
                 quiet += 1
                 if quiet > 3 and last == (0.0, 0.0):
@@ -263,7 +277,7 @@ class Sidecar:
                 quiet = 0
             if cur != last:
                 last = cur
-                self.emit("level", {"mic": cur[0], "out": cur[1]})
+                self.emit("level", {"mic": cur[0], "out": cur[1], "bands": bands})
 
     async def listen(self):
         import sounddevice as sd

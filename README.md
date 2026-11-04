@@ -8,6 +8,9 @@ broadcast-style subtitles, an audio-reactive visual, the agent's plan, and its c
 Speech runs **locally on your Mac** (Apple Silicon). The agent runs **on the Mac or on a server over SSH**:
 you talk on the laptop, and files, edits, git and Kiro sessions stay on the server.
 
+![Vocalo's face: idle · listening · thinking · speaking](docs/screens/face-states.jpg)
+*Vocalo's face — idle · listening · thinking · speaking.* ▶ [20-second demo video](docs/vocalo-demo.mp4)
+
 | speaking | agent working (plan) | code change | permission | push-to-talk, 4:3 |
 |---|---|---|---|---|
 | ![](docs/screens/speaking.jpg) | ![](docs/screens/working.jpg) | ![](docs/screens/diff.jpg) | ![](docs/screens/permission.jpg) | ![](docs/screens/ptt-4x3.jpg) |
@@ -70,7 +73,7 @@ The stage is a web page that Vocalo serves on `http://127.0.0.1:8766`, opened as
 - `?lite` renders at lower resolution (old GPUs, battery). If WebGL is unavailable, a CSS fallback is used.
 
 **Keys:** hold `Space` = push-to-talk (works in hands-free mode too) · `T` type · `:` or `⌘K` command palette · `Esc` interrupt ·
-`M` mute · `R` 16:9 ⇄ 4:3 · `F` fullscreen · `C` clear · `P` plan · `D` latency stats · `Y/A/N` permission · `O` open sign-in page.
+`M` mute · `V` face ⇄ orb · `R` 16:9 ⇄ 4:3 · `F` fullscreen · `C` clear · `P` plan · `D` latency stats · `Y/A/N` permission · `O` open sign-in page.
 
 Global hotkey without Swift: bind a key in Hammerspoon or Karabiner to `curl -XPOST localhost:8766/command -d '{"type":"ptt","active":true}'`.
 
@@ -275,7 +278,7 @@ Model weights have their own licenses; check each model card before shipping any
 | `src/core/chunker.js` · `scene.js` · `lang.js` | token stream → speakable chunks · `[[stage tags]]` · FI/EN guess |
 | `src/config.js` | defaults ← file ← profile ← CLI |
 | `src/ui/events.js` · `launch.js` · `tui.js` | stage server · app window launcher · terminal UI |
-| `web/` | the stage (no build step; shaders served from `node_modules`) |
+| `web/` | the stage (no build step; shaders served from `node_modules`) · `face.js` the living face · `face-lab.html` tuning page |
 | `desktop/` | Tauri v2 wrapper (`npm run build` on the Mac) |
 | `sidecar/vocalo_speech/` | mic, VAD, Smart Turn, STT, TTS, player, levels, `--bench` |
 | `steering/vocalo.md` · `personas/` | Kiro steering · profile personas |
@@ -283,9 +286,10 @@ Model weights have their own licenses; check each model card before shipping any
 ## Development
 
 ```bash
-npm test                          # 30 node tests: ACP mock agent, remote over fake ssh, talker, profiles, web server
+npm test                          # 31 node tests: ACP mock agent, remote over fake ssh, talker, profiles, web server
 npm run test:py                   # sidecar tests with fake audio device + engines
 python3 scripts/ui-snapshot.py    # drives the stage in headless Chrome, writes screenshots
+python3 scripts/record-demo.py    # records docs/vocalo-demo.mp4 (needs ffmpeg)
 ```
 `test/mock-agent.js` behaves like Kiro V3 (config options, sessions, steer, plans, diffs, permissions, context usage),
 so everything except real speech and real Kiro is testable on any machine. CI runs both suites.
