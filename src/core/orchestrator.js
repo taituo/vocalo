@@ -157,7 +157,7 @@ export class Orchestrator extends EventEmitter {
     this.lastInterrupted = null;
     this.pendingVerbosity = null;
     if (!this.preambleSent) {
-      promptText = voicePreamble({ talker: !!this.talker?.enabled, verbosity: this.config.verbosity }) + promptText;
+      promptText = voicePreamble({ talker: !!this.talker?.enabled, verbosity: this.config.verbosity, persona: this.config.persona }) + promptText;
       this.preambleSent = true;
     }
     turn.heard = [];

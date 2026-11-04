@@ -12,6 +12,8 @@ cat <<MSG
 Done. Next:
   1. edit vocalo.config.json (kiro-cli full path: \`which kiro-cli\`, project cwd)
   2. copy steering:  mkdir -p <project>/.kiro/steering && cp steering/vocalo.md <project>/.kiro/steering/
-  3. run:            npm start
+  3. run:            npm start            (stage opens as an app window; just talk)
   Text-only demo:    npm run demo
+  Native window:     npm run desktop:build   (optional, needs Rust: brew install rust)
+  Remote Kiro:       node src/index.js --remote me@box:/path --doctor
 MSG

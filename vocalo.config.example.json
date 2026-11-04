@@ -9,19 +9,12 @@
   },
   "cwd": "/Users/YOU/code/some-project",
 
-  "remote_example_rename_to_remote_to_enable": {
-    "host": "me@devbox",
-    "port": 22,
-    "identityFile": null,
-    "cwd": "/home/me/code/some-project",
-    "command": "~/.local/bin/kiro-cli",
-    "env": { "KIRO_LOG_LEVEL": "info" },
-    "sshOptions": []
+  "speech": { "url": "ws://127.0.0.1:8765", "spawn": true, "ttsEn": null, "ttsFi": null, "voiceDesc": null },
+  "ui": { "mode": "web", "aspect": "16:9", "eventsPort": 8766, "host": "127.0.0.1", "open": true, "openWith": "auto", "kiosk": false },
+  "conversation": {
+    "mode": "vad", "bargeIn": true, "permissions": "ask", "busyPolicy": "steer",
+    "verbosity": "short", "fillerAfterMs": 1400, "narrateEveryMs": 7000, "defaultLang": "fi", "persona": null
   },
-
-  "speech": { "url": "ws://127.0.0.1:8765", "spawn": true },
-  "ui": { "aspect": "16:9", "eventsPort": 8766 },
-  "conversation": { "mode": "vad", "bargeIn": true, "permissions": "ask", "busyPolicy": "steer", "verbosity": "short", "narrateEveryMs": 7000, "preamble": true, "defaultLang": "fi", "fillerAfterMs": 1400 },
   "talker": {
     "url": "http://127.0.0.1:8080/v1",
     "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
@@ -29,5 +22,33 @@
     "ackDeadlineMs": 900
   },
   "control": { "autoCompactAt": 85, "speakConfirmations": false },
-  "metricsFile": null
+  "metricsFile": null,
+
+  "defaultProfile": "kiro",
+  "profiles": {
+    "kiro": {
+      "description": "Kiro on this Mac, balanced"
+    },
+    "fast": {
+      "description": "Lowest latency: fastest model, low effort, Kokoro for English",
+      "agent": { "model": "REPLACE-with-fastest-from---list-models", "effortLevel": "low" },
+      "speech": { "ttsEn": "kokoro" },
+      "conversation": { "verbosity": "short", "fillerAfterMs": 1000 }
+    },
+    "server": {
+      "extends": "fast",
+      "description": "Kiro on the dev box over SSH; files and edits stay there",
+      "remote": { "host": "me@devbox", "cwd": "/home/me/code/some-project", "command": "~/.local/bin/kiro-cli" },
+      "conversation": { "busyPolicy": "steer", "permissions": "ask" }
+    },
+    "coach": {
+      "description": "Teaching: deeper answers, patient persona, calmer voice",
+      "conversation": { "verbosity": "normal", "persona": "personas/coach.md" },
+      "speech": { "voiceDesc": "A calm, warm woman in her thirties, patient teacher, clear and unhurried" }
+    },
+    "tv": {
+      "description": "Big screen: fullscreen stage, LAN-visible (open it on an iPad/TV)",
+      "ui": { "host": "0.0.0.0", "kiosk": true }
+    }
+  }
 }

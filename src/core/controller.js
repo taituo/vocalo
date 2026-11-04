@@ -145,7 +145,8 @@ export class Controller extends EventEmitter {
       if (!opt) return this.emit('info', `agent offers no ${kind} option`);
       if (ctx.voice) return this.#say(`Current ${kind}: ${opt.currentValue}.`, `Nykyinen ${kind}: ${opt.currentValue}.`, ctx);
       return this.#overlay(opt.name ?? kind, (opt.options ?? []).map((v) =>
-        `${v.value === opt.currentValue ? '▶' : ' '} ${v.value}${v.name && v.name !== v.value ? `  ${v.name}` : ''}${v.description ? `  — ${v.description}` : ''}`));
+        `${v.value === opt.currentValue ? '▶' : ' '} ${v.value}${v.name && v.name !== v.value ? `  ${v.name}` : ''}${v.description ? `  — ${v.description}` : ''}`),
+        (opt.options ?? []).map((v) => `${kind} ${v.value}`));
     }
     if (kind === 'mode' && !opt) {
       const m = this.acp.kiro.modes?.availableModes?.find((x) => x.id.toLowerCase() === arg.toLowerCase() || (x.name ?? '').toLowerCase() === arg.toLowerCase());
@@ -161,8 +162,10 @@ export class Controller extends EventEmitter {
   async #sessions() {
     this.lastSessions = await this.acp.listSessions({ cwd: this.acp.cwd });
     if (!this.lastSessions.length) return this.emit('info', 'no sessions for this folder');
-    return this.#overlay('Sessions  (:resume N)', this.lastSessions.slice(0, 15).map((s, i) =>
-      `${String(i + 1).padStart(2)}. ${s.id === this.acp.sessionId ? '▶ ' : ''}${s.title || '(untitled)'}  ${fmtTime(s.updatedAt)}  ${s.id.slice(0, 12)}`));
+    const shown = this.lastSessions.slice(0, 15);
+    return this.#overlay('Sessions  (:resume N)', shown.map((s, i) =>
+      `${String(i + 1).padStart(2)}. ${s.id === this.acp.sessionId ? '▶ ' : ''}${s.title || '(untitled)'}  ${fmtTime(s.updatedAt)}  ${s.id.slice(0, 12)}`),
+      shown.map((s, i) => (s.id === this.acp.sessionId ? null : `resume ${i + 1}`)));
   }
 
   async #resume(arg, ctx) {
@@ -221,7 +224,7 @@ export class Controller extends EventEmitter {
     if (ctx.voice) this.#say(`Here's ${arg.split('/').pop()}.`, `Tässä ${arg.split('/').pop()}.`, ctx);
   }
 
-  #overlay(title, lines) { this.emit('overlay', { title, lines }); }
+  #overlay(title, lines, picks = []) { this.emit('overlay', { title, lines, picks }); }
 
   async #maybeAutoCompact(k) {
     const at = this.config.autoCompactAt;

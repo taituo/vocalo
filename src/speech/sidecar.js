@@ -74,7 +74,20 @@ export class SpeechSidecar extends EventEmitter {
 
 /** Text-only stand-in used with --no-speech: "speaks" by timing, so subtitles still flow. */
 export class SilentSpeech extends EventEmitter {
-  constructor({ wpm = 190 } = {}) { super(); this.wpm = wpm; this.q = []; this.playing = false; this.timer = null; }
+  constructor({ wpm = 190, levels = true } = {}) {
+    super(); this.wpm = wpm; this.q = []; this.playing = false; this.timer = null;
+    // fake speech envelope so the web stage's audio-reactive visuals work in text-only demos
+    if (levels) {
+      let t = 0;
+      this.levelTimer = setInterval(() => {
+        t += 1;
+        const out = this.playing ? Math.max(0, 0.35 + 0.3 * Math.sin(t / 2.3) + 0.25 * Math.sin(t / 0.9) * Math.random()) : 0;
+        if (out || this.lastOut) this.emit('level', { mic: 0, out: Math.round(out * 1000) / 1000 });
+        this.lastOut = out;
+      }, 33);
+      this.levelTimer.unref?.();
+    }
+  }
   async start() { setTimeout(() => this.emit('ready', { engines: { tts: 'silent', stt: 'keyboard' } })); return this; }
   say(id, text) { this.q.push({ id, text }); if (!this.playing) this.#next(); }
   #next() {
@@ -86,5 +99,5 @@ export class SilentSpeech extends EventEmitter {
     this.timer = setTimeout(() => { this.emit('say_end', { id: item.id }); this.#next(); }, durationMs);
   }
   stop() { clearTimeout(this.timer); this.q = []; if (this.playing) { this.playing = false; this.emit('idle', {}); } }
-  mic() {} mode() {} ptt() {} close() { this.stop(); }
+  mic() {} mode() {} ptt() {} close() { this.stop(); clearInterval(this.levelTimer); }
 }

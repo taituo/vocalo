@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The stage only talks HTTP to the local Vocalo server; no Tauri APIs are exposed.",
+  "windows": ["stage"],
+  "permissions": []
+}

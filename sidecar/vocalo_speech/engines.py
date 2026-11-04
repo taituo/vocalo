@@ -216,10 +216,17 @@ class VoxCPM2TTS(_MlxAudioTTS):
     VOICE_DESC = "A young woman in her late twenties, warm, bright and friendly, clear articulation, natural conversational pace, like a TV presenter"
     REF_TEXT = "Hi, I'm Vocalo. Hei, minä olen Vocalo. Let's talk about anything you like."
 
-    def __init__(self, model_id=None, voice_ref: str | None = None, timesteps: int = 7, cfg: float = 2.0):
+    def __init__(self, model_id=None, voice_ref: str | None = None, timesteps: int = 7, cfg: float = 2.0,
+                 voice_desc: str | None = None):
         super().__init__(model_id)
         self.timesteps, self.cfg = timesteps, cfg
-        self.ref = Path(voice_ref or Path(__file__).resolve().parent.parent / "voices" / "vocalo_ref.wav")
+        if voice_desc:  # a profile's own voice: designed once, cached by prompt hash
+            import hashlib
+            self.VOICE_DESC = voice_desc
+            name = "voice_" + hashlib.sha1(voice_desc.encode()).hexdigest()[:10] + ".wav"
+        else:
+            name = "vocalo_ref.wav"
+        self.ref = Path(voice_ref or Path(__file__).resolve().parent.parent / "voices" / name)
         self.ref_text = self.REF_TEXT
         if not self.ref.exists():
             self._design_voice()
@@ -258,10 +265,10 @@ class TTSRouter:
     """Routes each chunk to an engine by language. Kokoro is English-only."""
 
     def __init__(self, en: str = "voxcpm2", fi: str = "voxcpm2", voice_ref: str | None = None,
-                 voxcpm_model: str | None = None, timesteps: int = 7):
+                 voxcpm_model: str | None = None, timesteps: int = 7, voice_desc: str | None = None):
         self.engines = {}
         make = {
-            "voxcpm2": lambda: VoxCPM2TTS(voxcpm_model, voice_ref=voice_ref, timesteps=timesteps),
+            "voxcpm2": lambda: VoxCPM2TTS(voxcpm_model, voice_ref=voice_ref, timesteps=timesteps, voice_desc=voice_desc),
             "kokoro": lambda: KokoroTTS(),
         }
         for name in {en, fi}:

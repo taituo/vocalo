@@ -50,6 +50,7 @@ class Player:
         self.cur_buf = np.zeros(0, np.float32)
         self.was_active = False
         self.fade = None
+        self.level = 0.0  # RMS of what is being played (for UI visuals)
         self.stream = sd.OutputStream(samplerate=OUT_SR, channels=1, dtype="float32",
                                       blocksize=480, latency="low", callback=self._cb)
         self.stream.start()
@@ -118,6 +119,7 @@ class Player:
                 out[filled:filled + n, 0] = self.cur_buf[:n]
                 self.cur_buf = self.cur_buf[n:]
                 filled += n
+            self.level = float(np.sqrt(np.mean(out[:, 0] ** 2))) if frames else 0.0
             active = self.cur is not None or bool(self.items)
             if self.was_active and not active:
                 events.append(("idle", {}))
@@ -140,6 +142,7 @@ class Sidecar:
         self.frames: asyncio.Queue = asyncio.Queue()
         self.cache: dict = {}
         self.utt = 0  # utterance counter: partials from an older utterance are dropped
+        self.mic_level = 0.0
 
     # -------- plumbing
     def emit(self, type_, payload=None):
@@ -169,7 +172,8 @@ class Sidecar:
         self.turn = None if self.args.no_smart_turn else SmartTurn(self.args.smart_turn_path)
         self.stt = ParakeetSTT(self.args.stt_model)
         self.tts = TTSRouter(en=self.args.tts_en, fi=self.args.tts_fi, voice_ref=self.args.voice_ref,
-                             voxcpm_model=self.args.voxcpm_model, timesteps=self.args.timesteps)
+                             voxcpm_model=self.args.voxcpm_model, timesteps=self.args.timesteps,
+                             voice_desc=self.args.voice_desc)
         self.tts.warmup()
         self.cache = {}
         for key, (text, lang) in FILLERS.items():  # instant "thinking" phrases
@@ -239,7 +243,27 @@ class Sidecar:
 
     # -------- mic + turn-taking
     def _mic_cb(self, indata, frames, _t, _s):
-        self.loop.call_soon_threadsafe(self.frames.put_nowait, indata[:, 0].copy())
+        x = indata[:, 0].copy()
+        self.mic_level = float(np.sqrt(np.mean(x ** 2))) if self.mic_enabled else 0.0
+        self.loop.call_soon_threadsafe(self.frames.put_nowait, x)
+
+    async def levels(self, hz: float = 30.0):
+        """Stream mic/speaker loudness for audio-reactive visuals (cheap: two floats, ~30 Hz)."""
+        last = (-1.0, -1.0)
+        quiet = 0
+        while True:
+            await asyncio.sleep(1 / hz)
+            cur = (round(min(1.0, self.mic_level * 6), 3), round(min(1.0, getattr(self.player, "level", 0.0) * 4), 3))
+            if max(cur) < 0.01:
+                quiet += 1
+                if quiet > 3 and last == (0.0, 0.0):
+                    continue  # silence: stop sending after a final zero
+                cur = (0.0, 0.0)
+            else:
+                quiet = 0
+            if cur != last:
+                last = cur
+                self.emit("level", {"mic": cur[0], "out": cur[1]})
 
     async def listen(self):
         import sounddevice as sd
@@ -284,14 +308,17 @@ class Sidecar:
             if not self.mic_enabled:
                 continue
 
-            # ---------- push-to-talk: record while active, send on release
-            if self.mode == "ptt":
+            # ---------- push-to-talk: record while held (in ANY mode), send on release
+            if self.mode == "ptt" or self.ptt_active or was_ptt:
                 if self.ptt_active:
                     if not was_ptt:
                         last_partial = time.monotonic()
                         self.stop_speaking()
                         self.emit("vad", {"speaking": True})
-                        speech = []
+                        speech, in_speech, voiced, silent, pause_at, turn_checked = [], False, 0, 0, None, False
+                        if spec is not None:
+                            spec[1].cancel()
+                            spec = None
                     speech.append(frame)
                     was_ptt = True
                     if time.monotonic() - last_partial > a.partial_every and (partial_task is None or partial_task.done()):
@@ -377,6 +404,7 @@ class Sidecar:
         self.player = Player(self.emit)
         asyncio.create_task(self.tts_worker())
         asyncio.create_task(self.listen())
+        asyncio.create_task(self.levels())
         async with websockets.serve(self.handler, self.args.host, self.args.port, max_size=None):
             self.log(f"vocalo speech sidecar on ws://{self.args.host}:{self.args.port}")
             await asyncio.Future()
@@ -424,6 +452,7 @@ def parse():
     ap.add_argument("--voxcpm-model", default="mlx-community/VoxCPM2-8bit")
     ap.add_argument("--timesteps", type=int, default=7, help="VoxCPM2 diffusion steps (lower = faster)")
     ap.add_argument("--voice-ref", default=None, help="reference wav for the voice (auto-designed if missing)")
+    ap.add_argument("--voice-desc", default=None, help="VoxCPM2 voice design prompt (each prompt gets its own cached voice)")
     ap.add_argument("--input-device", default=None)
     ap.add_argument("--vad-threshold", type=float, default=0.5)
     ap.add_argument("--stop-ms", type=int, default=200, help="pause before Smart Turn is consulted")

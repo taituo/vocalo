@@ -1,7 +1,7 @@
 {
   "name": "vocalo",
-  "version": "0.4.0",
-  "description": "Voice-first, TV-style conversational shell for ACP agents (Kiro CLI V3 by default).",
+  "version": "0.5.0",
+  "description": "Voice-first, TV-style stage for ACP agents (Kiro CLI V3): local speech on Apple Silicon, Kiro local or over SSH.",
   "type": "module",
   "bin": {
     "vocalo": "src/index.js"
@@ -15,7 +15,13 @@
     "demo:voice": "node src/index.js --agent \"node test/mock-agent.js\"",
     "test": "node --test --test-timeout=20000 test/*.test.js",
     "test:py": "cd sidecar && python3 -m pytest -q tests",
-    "doctor": "node src/index.js --doctor"
+    "doctor": "node src/index.js --doctor",
+    "demo:tui": "node src/index.js --ui tui --no-open --no-speech --agent \"node test/mock-agent.js\"",
+    "desktop:build": "cd desktop && npm i && npm run build",
+    "snapshot": "python3 scripts/ui-snapshot.py"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@paper-design/shaders": "0.0.82"
+  }
 }

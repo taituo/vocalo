@@ -108,6 +108,29 @@ def test_resumed_speech_discards_speculation():
     assert finals[0]["text"] == "words55"  # 20+8+20 speech + 7 pause frames: the 2nd cut, not the stale 1st
 
 
+def test_hold_to_talk_works_in_hands_free_mode():
+    sc, ev = make_sidecar()
+    sc.mode = "vad"
+
+    async def run():
+        sc.loop = asyncio.get_running_loop()
+        task = asyncio.create_task(sc.listen())
+        sc.player = SimpleNamespace(active=False, stop=lambda: None)
+        sc.ptt_active = True
+        for f in frames([(0.0, 20)]):  # quiet speech: VAD would ignore it, PTT must not
+            sc.frames.put_nowait(f)
+        await asyncio.sleep(0.2)
+        sc.ptt_active = False
+        sc.frames.put_nowait(np.zeros(FRAME, np.float32))
+        await asyncio.sleep(0.3)
+        task.cancel()
+
+    sc.stop_speaking = lambda: None
+    asyncio.run(run())
+    finals = [p for t, p in ev if t == "final"]
+    assert len(finals) == 1 and finals[0]["text"] == "words20"
+
+
 def test_player_streams_and_signals():
     ev = []
     p = Player(lambda t, d=None: ev.append((t, (d or {}).get("id"))))

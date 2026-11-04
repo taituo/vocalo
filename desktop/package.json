@@ -1,0 +1,10 @@
+{
+  "name": "vocalo-desktop",
+  "private": true,
+  "scripts": {
+    "icons": "tauri icon icon-source.png",
+    "build": "tauri build",
+    "dev": "tauri dev"
+  },
+  "devDependencies": { "@tauri-apps/cli": "^2" }
+}
