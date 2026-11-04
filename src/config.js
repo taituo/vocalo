@@ -10,7 +10,7 @@ export const DEFAULTS = {
   remote: null, // { host, port, identityFile, sshOptions: [], env: {}, cwd, command, shell }
   cwd: null,
   speech: { url: 'ws://127.0.0.1:8765', spawn: true, python: null, ttsEn: null, ttsFi: null, voiceDesc: null, args: [] },
-  ui: { mode: 'web', avatar: 'bot', theme: 'auto', aspect: '16:9', eventsPort: 8766, host: '127.0.0.1', open: true, openWith: 'auto', kiosk: false },
+  ui: { mode: 'web', avatar: 'human', theme: 'auto', aspect: '16:9', eventsPort: 8766, host: '127.0.0.1', open: true, openWith: 'auto', kiosk: false },
   conversation: { mode: 'vad', bargeIn: true, permissions: 'ask', preamble: true, defaultLang: 'en', busyPolicy: 'steer',
     verbosity: 'short', fillerAfterMs: 1400, narrateEveryMs: 7000, persona: null },
   control: { autoCompactAt: 85, speakConfirmations: false },

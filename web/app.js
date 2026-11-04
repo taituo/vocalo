@@ -5,6 +5,7 @@
 //   border      PulsingBorder  "attention": recording (push-to-talk) or waiting for permission
 import { Face, FACE_PALETTES } from './face.js';
 import { createBot, BOT_PALETTES } from './bot.js';
+import { createHuman, HUMAN_PALETTES } from './human.js';
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
 const S = {
@@ -15,10 +16,10 @@ const S = {
   avatarPref: new URLSearchParams(location.search).get('avatar') || localStorage.getItem('vocalo.avatar') || null,
   cfgAvatar: null, ready: false,
 };
-let face = null, bot = null;
-const AVATARS = ['bot', 'face', 'orb'];
+let face = null, bot = null, human = null;
+const AVATARS = ['human', 'bot', 'face', 'orb'];
 /** the avatar currently on stage (bot or face share one API) */
-const avatar = () => (S.avatar === 'bot' ? bot : S.avatar === 'face' ? face : null);
+const avatar = () => ({ human, bot, face })[S.avatar] ?? null;
 
 // ------------------------------------------------------------------ comms
 const send = (cmd) => fetch('/command', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(cmd) }).catch(() => {});
@@ -69,7 +70,7 @@ function handle(ev, replay = false) {
 
 function setState(st) {
   S.state = st;
-  face?.setState(st); bot?.setState(st);
+  face?.setState(st); bot?.setState(st); human?.setState(st);
   stage.dataset.state = st;
   $('#live').hidden = st !== 'speaking';
   $('#chip-state').textContent = { idle: 'ready', listening: '● listening', thinking: '◌ thinking', speaking: '◉ speaking' }[st] ?? st;
@@ -222,14 +223,13 @@ function attention() { stage.dataset.attn = S.ptt || S.pttDown || S.permission |
 // ------------------------------------------------------------------ keyboard
 // day theme (pastel, PS1 robot) vs night theme (dark stage, light face/orb); "auto" follows the avatar
 function applyTheme() {
-  const th = S.theme && S.theme !== 'auto' ? S.theme : S.avatar === 'bot' ? 'day' : 'night';
+  const th = S.theme && S.theme !== 'auto' ? S.theme : (S.avatar === 'bot' || S.avatar === 'human') ? 'day' : 'night';
   if (document.documentElement.dataset.theme !== th) S.snapPalette = true;  // jump, don't fade dark->pastel
   document.documentElement.dataset.theme = th;
 }
 function setAvatar(a, remember = true) {
-  if (!AVATARS.includes(a)) a = 'bot';
-  if (a === 'bot' && !bot) a = face ? 'face' : 'orb';
-  if (a === 'face' && !face) a = 'orb';
+  if (!AVATARS.includes(a)) a = 'human';
+  if (a !== 'orb' && !({ human, bot, face })[a]) a = human ? 'human' : bot ? 'bot' : face ? 'face' : 'orb';
   S.avatar = a; document.documentElement.dataset.avatar = a;
   applyTheme();
   if (remember) { S.avatarPref = a; try { localStorage.setItem('vocalo.avatar', a); } catch {} }
@@ -305,7 +305,7 @@ function paletteFor(base, state) {
 // face palette per state: [deep, body, rim, eyes], eased in frame()
 let avCur = null, avCurFor = null;
 function avatarColors(st) {
-  const P = S.avatar === 'bot' ? BOT_PALETTES : FACE_PALETTES;
+  const P = { bot: BOT_PALETTES, human: HUMAN_PALETTES }[S.avatar] ?? FACE_PALETTES;
   const goal = (P[st] ?? P.idle)(rgbToHsl(hexToRgb(S.base))[0]);
   if (avCurFor !== S.avatar) { avCur = goal; avCurFor = S.avatar; }
   avCur = avCur.map((c, i) => c.map((v, j) => lerp(v, goal[i][j], 0.06)));
@@ -330,11 +330,12 @@ async function initShaders() {
       u_colorBack: [0, 0, 0, 0], u_colors: ORB.idle(200), u_colorsCount: 2, u_noiseScale: 3, u_noiseIterations: 8,
       u_thickness: 0.6, u_radius: 0.25, u_innerShape: 0.7, u_noiseTexture: noise, ...sz({ fit: 'contain', scale: 0.62 }),
     }, { premultipliedAlpha: true, alpha: true }, 0.5, 0, PX[0], PX[1]);
+    try { human = createHuman($('#human'), { lite: LITE }); human.setState(S.state); } catch (e) { console.warn('human unavailable', e); }
     try { bot = createBot($('#bot'), { lite: LITE }); bot.setState(S.state); } catch (e) { console.warn('bot unavailable', e); }
     try { face = new Face($('#face'), { lite: LITE }); face.setState(S.state); } catch (e) { console.warn('face unavailable', e); }
-    window.__vocalo = { face, bot, S };
+    window.__vocalo = { face, bot, human, S };
     S.ready = true;
-    setAvatar(S.avatarPref || S.cfgAvatar || 'bot', false);
+    setAvatar(S.avatarPref || S.cfgAvatar || 'human', false);
     if (LITE) document.documentElement.classList.add('no-border');
     else borderMount = new P.ShaderMount($('#border'), P.pulsingBorderFragmentShader, {
       u_colorBack: [0, 0, 0, 0], u_colors: [hsl(38, 1, 0.6), hsl(330, 0.9, 0.6), hsl(200, 0.9, 0.6)], u_colorsCount: 3,

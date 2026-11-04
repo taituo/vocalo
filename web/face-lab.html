@@ -21,11 +21,13 @@
 <script type="module">
   import { Face, FACE_PALETTES } from './face.js';
   import { createBot, BOT_PALETTES } from './bot.js';
+  import { createHuman, HUMAN_PALETTES } from './human.js';
   const q = new URLSearchParams(location.search);
-  const bot = (q.get('avatar') || 'bot') === 'bot';
-  if (bot) document.body.style.background = 'linear-gradient(160deg, #cfe8ff 0%, #ffe3ef 55%, #fff1d6 100%)';
-  const f = bot ? createBot(document.getElementById('face'), { lite: q.has('lite') }) : new Face(document.getElementById('face'), { lite: q.has('lite') });
-  const PAL = bot ? BOT_PALETTES : FACE_PALETTES;
+  const kind = q.get('avatar') || 'human';
+  const el = document.getElementById('face'), lite = q.has('lite');
+  if (kind !== 'face') document.body.style.background = 'linear-gradient(160deg, #cfe8ff 0%, #ffe3ef 55%, #fff1d6 100%)';
+  const f = kind === 'bot' ? createBot(el, { lite }) : kind === 'human' ? createHuman(el, { lite }) : new Face(el, { lite });
+  const PAL = { bot: BOT_PALETTES, human: HUMAN_PALETTES, face: FACE_PALETTES }[kind];
   window.face = f;
   let st = q.get('state') || 'speaking';
   const setSt = (x) => { st = x; f.setState(x); f.setColors(PAL[x](222)); };
